@@ -61,7 +61,7 @@ class STTService:
             language="en-US",
             smart_format=True,
             interim_results=True,
-            endpointing=300,
+            endpointing=500,
         )
 
         self._connection = self._client.listen.asyncwebsocket.v("1")
