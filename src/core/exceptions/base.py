@@ -41,3 +41,18 @@ class ConflictException(AppException):
 class NotFoundException(AppException):
     status_code = HTTPStatus.NOT_FOUND
     message = "Resource not found."
+
+
+class ForbiddenException(AppException):
+    status_code = HTTPStatus.FORBIDDEN
+    message = "Forbidden."
+
+
+class InternalServerException(AppException):
+    status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+    message = "Internal server error."
+
+
+class BadGatewayException(AppException):
+    status_code = HTTPStatus.BAD_GATEWAY
+    message = "Bad gateway."

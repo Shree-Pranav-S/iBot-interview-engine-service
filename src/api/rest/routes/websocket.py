@@ -47,8 +47,7 @@ router = APIRouter()
 
 
 @router.websocket("/ws/interview")
-@router.websocket("/ws/interview/{path:path}")
-async def interview_websocket(websocket: WebSocket, path: str = "") -> None:
+async def interview_websocket(websocket: WebSocket) -> None:
     """Accept and orchestrate a real-time AI interview session."""
     candidate_id: str = websocket.headers.get("x-candidate-id", "unknown")
     assessment_id: str = websocket.headers.get("x-assessment-id", "unknown")
@@ -89,51 +88,72 @@ async def interview_websocket(websocket: WebSocket, path: str = "") -> None:
                 await stt.send_audio(chunk)
 
         async def process_transcripts(stt: STTService) -> None:
-            async for event in stt.transcript_events():
-                if not event.is_final:
-                    await outbound_queue.put(
-                        _server_msg(
-                            ServerMessageType.PARTIAL_TRANSCRIPT,
-                            text=event.text,
-                        )
-                    )
-                else:
-                    await outbound_queue.put(
-                        _server_msg(
-                            ServerMessageType.FINAL_TRANSCRIPT,
-                            text=event.text,
-                        )
-                    )
-                    # Feed final transcript to LLM
-                    try:
-                        reply = await llm.get_reply(event.text)
-                        await outbound_queue.put(
-                            _server_msg(
-                                ServerMessageType.ASSISTANT_TEXT,
-                                text=reply,
-                            )
-                        )
-                        # Generate TTS and enqueue binary audio
+            accumulated_text: list[str] = []
+            timer_task: asyncio.Task | None = None
+
+            async def wait_and_trigger() -> None:
+                try:
+                    await asyncio.sleep(3.0)
+                    if accumulated_text:
+                        combined_text = " ".join(accumulated_text)
+                        accumulated_text.clear()
                         try:
-                            audio_bytes = await synthesize_speech(reply)
+                            reply = await llm.get_reply(combined_text)
                             await outbound_queue.put(
                                 _server_msg(
-                                    ServerMessageType.TTS_AUDIO,
-                                    encoding="mp3",
-                                    size=len(audio_bytes),
+                                    ServerMessageType.ASSISTANT_TEXT,
+                                    text=reply,
                                 )
                             )
-                            await outbound_queue.put(audio_bytes)
+                            # Generate TTS and enqueue binary audio
+                            try:
+                                audio_bytes = await synthesize_speech(reply)
+                                await outbound_queue.put(
+                                    _server_msg(
+                                        ServerMessageType.TTS_AUDIO,
+                                        encoding="mp3",
+                                        size=len(audio_bytes),
+                                    )
+                                )
+                                await outbound_queue.put(audio_bytes)
+                            except Exception:
+                                logger.exception("TTS synthesis failed")
                         except Exception:
-                            logger.exception("TTS synthesis failed")
-                    except Exception:
-                        logger.exception("LLM call failed after transcript")
+                            logger.exception("LLM call failed after transcript")
+                            await outbound_queue.put(
+                                _server_msg(
+                                    ServerMessageType.ERROR,
+                                    message="AI response error. Please try again.",
+                                )
+                            )
+                except asyncio.CancelledError:
+                    pass
+
+            try:
+                async for event in stt.transcript_events():
+                    if timer_task and not timer_task.done():
+                        timer_task.cancel()
+
+                    if not event.is_final:
                         await outbound_queue.put(
                             _server_msg(
-                                ServerMessageType.ERROR,
-                                message="AI response error. Please try again.",
+                                ServerMessageType.PARTIAL_TRANSCRIPT,
+                                text=event.text,
                             )
                         )
+                    else:
+                        await outbound_queue.put(
+                            _server_msg(
+                                ServerMessageType.FINAL_TRANSCRIPT,
+                                text=event.text,
+                            )
+                        )
+                        if event.text.strip():
+                            accumulated_text.append(event.text.strip())
+                            timer_task = asyncio.create_task(wait_and_trigger())
+            finally:
+                if timer_task and not timer_task.done():
+                    timer_task.cancel()
 
         # Expose the audio_queue to inbound_task via shared session state
         session_state["audio_queue"] = audio_queue

@@ -9,7 +9,6 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src ./src
-COPY main.py ./main.py
 
 RUN python -m pip install --upgrade pip \
     && python -c "import tomllib, pathlib; deps=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8')).get('project', {}).get('dependencies', []); pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(deps) + '\n', encoding='utf-8')" \
