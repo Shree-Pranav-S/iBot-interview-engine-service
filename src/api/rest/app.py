@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api.middleware.error_handler import register_exception_handlers
+from src.api.rest.routes.demo_websocket import router as demo_ws_router
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.websocket import router as ws_router
 from src.config.settings import settings
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.include_router(health_router)
     app.include_router(ws_router)
+    app.include_router(demo_ws_router)
     return app
 
 
