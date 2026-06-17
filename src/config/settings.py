@@ -25,9 +25,19 @@ class Settings(BaseSettings):
 
     # ── Groq (LLM) ───────────────────────────────────────────────────────────
     GROQ_API_KEY: str = Field(default="")
-    GROQ_MODEL: str = Field(default="llama-3.1-8b-instant")
+    GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
     GROQ_MAX_TOKENS: int = Field(default=512)
     GROQ_TEMPERATURE: float = Field(default=0.7)
+
+    # ── Groq Evaluation Model ────────────────────────────────────────────────
+    GROQ_EVAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    GROQ_EVAL_MAX_TOKENS: int = Field(default=1024)
+    GROQ_EVAL_TEMPERATURE: float = Field(default=0.3)
+
+    # ── Groq Classification Model ────────────────────────────────────────────
+    GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")
+    GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=32)
+    GROQ_CLASSIFY_TEMPERATURE: float = Field(default=0.0)
 
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
