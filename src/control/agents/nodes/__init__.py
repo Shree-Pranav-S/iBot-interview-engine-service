@@ -1,1 +1,1 @@
-"""Interview graph node implementations."""
+"""Graph nodes for the live interview workflow."""

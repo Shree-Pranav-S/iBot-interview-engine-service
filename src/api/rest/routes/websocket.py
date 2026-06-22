@@ -1,34 +1,4 @@
-"""
-WebSocket endpoint for real-time AI interview sessions.
-
-Flow
-----
-1.  Gateway validates the candidate's one-time token and injects
-    X-Candidate-Id / X-Assessment-Id headers before forwarding here.
-2.  We accept the connection and start two concurrent tasks:
-      • inbound_task  – reads client frames (binary audio only)
-      • outbound_task – pumps server messages from an async queue
-3.  On SESSION_START, the orchestrator first checks for an existing
-    checkpoint. If one exists and is resumable (within the grace period),
-    the session resumes — the current question is re-sent via TTS.
-    Otherwise, a fresh session is started: init → opening → await_response.
-4.  Audio from the client microphone is streamed through Deepgram STT.
-    When a complete utterance is detected, it's submitted to the graph
-    via orchestrator.submit_response(transcript). The graph processes
-    classify → evaluate → generate_question → await_response (interrupt)
-    and the resulting bot reply is sent back as text + TTS audio.
-5.  On disconnect, the session is paused with a grace period. If the
-    candidate reconnects (new WebSocket with the same assessment_id),
-    the session is resumed from the checkpoint.
-6.  The microphone stream is always active from SESSION_START onwards;
-    there is no toggle. Either task cancelling (disconnect / stop command)
-    tears down the other task and closes everything cleanly.
-
-Header contract (set by the gateway WS proxy):
-    X-Candidate-Id   : UUID of the authenticated candidate
-    X-Assessment-Id  : UUID of the current assessment
-    X-Internal-Service: "gateway"
-"""
+"""WebSocket endpoint for real-time AI interview sessions."""
 
 from __future__ import annotations
 
@@ -38,253 +8,292 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from src.core.services.evaluation_service import run_holistic_evaluation
+from src.control.agents.state import InterviewState
 from src.core.services.interview_service import InterviewOrchestrator
 from src.core.services.stt_service import STTService
-from src.core.services.tts_service import synthesize_speech
-from src.data.repositories.interview_repository import sync_interview_state
-from src.schemas.ws_messages import (
-    ClientMessage,
-    ClientMessageType,
-    ServerMessageType,
-)
-from src.utils.ws import _server_msg
+from src.data.repositories import interview_workflow_repository as db
+from src.schemas.ws_messages import ClientMessage, ClientMessageType, ServerMessageType
+from src.utils.ws import _send_bot_reply, _send_section_info, _server_msg
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-
-async def _send_bot_reply(
-    outbound_queue: asyncio.Queue[str | bytes | None],
-    text: str,
-    reply_type: str,
-    turn_number: int = 0,
-) -> None:
-    """Send bot text + TTS audio to the client."""
-    if not text:
-        return
-
-    # 1. Send the text for subtitles
-    await outbound_queue.put(
-        _server_msg(ServerMessageType.ASSISTANT_TEXT, text=text, reply_type=reply_type)
-    )
-
-    # 2. Signal bot is speaking
-    await outbound_queue.put(
-        _server_msg(ServerMessageType.BOT_SPEAKING, text=text, turn_number=turn_number)
-    )
-
-    # 3. Synthesize and send TTS audio
-    try:
-        audio_bytes = await synthesize_speech(text)
-        await outbound_queue.put(
-            _server_msg(
-                ServerMessageType.TTS_AUDIO,
-                encoding="mp3",
-                size=len(audio_bytes),
-            )
-        )
-        await outbound_queue.put(audio_bytes)
-    except Exception:
-        logger.exception("TTS synthesis failed")
-
-    # 4. Signal bot done speaking
-    await outbound_queue.put(_server_msg(ServerMessageType.BOT_DONE_SPEAKING))
-
-
-async def _send_section_info(
-    outbound_queue: asyncio.Queue[str | bytes | None],
-    state: dict,
-) -> None:
-    """Send section start/progress info from graph state."""
-    sections = state.get("sections", [])
-    section_idx = state.get("current_section_index", 0)
-
-    if section_idx < len(sections):
-        section = sections[section_idx]
-        await outbound_queue.put(
-            _server_msg(
-                ServerMessageType.SECTION_START,
-                section_name=section["name"],
-                skill=section["skill"],
-                time_budget_secs=section["time_budget_secs"],
-                section_number=section_idx + 1,
-                total_sections=len(sections),
-            )
-        )
-
-
-async def _handle_session_resume(
-    orchestrator: InterviewOrchestrator,
-    outbound_queue: asyncio.Queue[str | bytes | None],
-) -> bool:
-    """
-    Attempt to resume an existing session from checkpoint.
-
-    Returns True if the session was successfully resumed, False otherwise.
-    On success, sends SESSION_RESUMED + section info + re-sends the
-    current question via TTS so the candidate knows where they left off.
-    """
-    state = await orchestrator.resume_session()
-
-    if state is None:
+def _session_closed(state: InterviewState | None) -> bool:
+    if not state:
         return False
+    return bool(state.get("closing_done") or state.get("should_close"))
 
-    # Session resumed! Tell the client.
-    turn_number = state.get("turn_number", 0)
-    section_idx = state.get("current_section_index", 0)
-    sections = state.get("sections", [])
-    current_section_name = (
-        sections[section_idx]["name"] if section_idx < len(sections) else "unknown"
-    )
 
-    await outbound_queue.put(
-        _server_msg(
-            ServerMessageType.SESSION_RESUMED,
-            turn_number=turn_number,
-            section_index=section_idx,
-            section_name=current_section_name,
-            message=(
-                "Welcome back! Your interview session has been restored. "
-                "Let me repeat the last question."
-            ),
+def _new_bot_turns(
+    previous_state: InterviewState | None,
+    state: InterviewState,
+) -> list[dict]:
+    transcript = state.get("transcript") or []
+
+    if previous_state is None and state.get("resumed"):
+        bot_turns = [
+            turn
+            for turn in transcript
+            if turn.get("speaker") == "bot" and turn.get("text")
+        ]
+        return bot_turns[-1:]
+
+    previous_len = len(previous_state.get("transcript", [])) if previous_state else 0
+
+    return [
+        turn
+        for turn in transcript[previous_len:]
+        if turn.get("speaker") == "bot" and turn.get("text")
+    ]
+
+
+async def _send_graph_outputs(
+    outbound_queue: asyncio.Queue[str | bytes | None],
+    previous_state: InterviewState | None,
+    state: InterviewState,
+    bot_speaking_event: asyncio.Event,
+) -> None:
+    old_idx = previous_state.get("current_section_index") if previous_state else None
+    new_idx = state.get("current_section_index")
+
+    if previous_state is None or old_idx != new_idx:
+        if previous_state is not None:
+            await outbound_queue.put(
+                _server_msg(
+                    ServerMessageType.SECTION_TRANSITION,
+                    from_section=previous_state.get("current_section_name"),
+                    to_section=state.get("current_section_name"),
+                )
+            )
+
+        await _send_section_info(outbound_queue, state)  # type: ignore
+
+    bot_turns = _new_bot_turns(previous_state, state)
+
+    if bot_turns:
+        if len(bot_turns) == 1:
+            turn = bot_turns[0]
+            reply_text = str(turn.get("text") or "").strip()
+            reply_type = str(turn.get("turn_type") or "assistant")
+            turn_number = int(turn.get("turn_number") or state.get("turn_number") or 0)
+        else:
+            reply_text = " ".join(
+                str(turn.get("text") or "").strip()
+                for turn in bot_turns
+                if turn.get("text")
+            ).strip()
+            reply_type = str(bot_turns[-1].get("turn_type") or "assistant")
+            turn_number = int(
+                bot_turns[-1].get("turn_number") or state.get("turn_number") or 0
+            )
+
+        if reply_text:
+            await _send_bot_reply(
+                outbound_queue,
+                reply_text,
+                reply_type,
+                turn_number,
+                bot_speaking_event,
+            )
+
+    if state.get("think_timer_active") and not (
+        previous_state and previous_state.get("think_timer_active")
+    ):
+        await outbound_queue.put(
+            _server_msg(ServerMessageType.THINK_TIMER_START, duration_secs=15)
         )
-    )
 
-    # Send section info
-    await _send_section_info(outbound_queue, state)
-
-    # Re-send the current question so the candidate knows where
-    # they left off. The bot should sound natural about it.
-    current_question = state.get("current_question_text", "")
-    if current_question:
-        resume_text = (
-            f"Welcome back! Let me pick up where we left off. {current_question}"
+    if state.get("closing_done"):
+        event_type = (
+            ServerMessageType.SESSION_TERMINATED
+            if state.get("session_status") == "TERMINATED"
+            else ServerMessageType.INTERVIEW_COMPLETE
         )
-        await _send_bot_reply(
-            outbound_queue,
-            resume_text,
-            "question",
-            turn_number=turn_number,
-        )
-
-    logger.info(
-        "Session resumed: assessment=%s turn=%d section=%s",
-        orchestrator.assessment_id,
-        turn_number,
-        current_section_name,
-    )
-
-    return True
-
-
-# ── main handler ──────────────────────────────────────────────────────────────
+        await outbound_queue.put(_server_msg(event_type))
 
 
 @router.websocket("/ws/interview")
 async def interview_websocket(websocket: WebSocket) -> None:
-    """Accept and orchestrate a real-time AI interview session."""
-    candidate_id: str = websocket.headers.get("x-candidate-id", "unknown")
-    assessment_id: str = websocket.headers.get("x-assessment-id", "unknown")
+    candidate_assessment_id = (
+        websocket.headers.get("x-candidate-assessment-id")
+        or websocket.headers.get("x-assessment-id")
+        or ""
+    )
+
+    if not candidate_assessment_id:
+        await websocket.close(code=1008)
+        return
+
+    can_start, reason = await db.assert_session_can_start(candidate_assessment_id)
+
+    if not can_start:
+        await websocket.accept()
+        await websocket.send_text(_server_msg(ServerMessageType.ERROR, message=reason))
+        await websocket.close(code=1008)
+        return
 
     await websocket.accept()
-    logger.info(
-        "Interview session started: candidate=%s assessment=%s",
-        candidate_id,
-        assessment_id,
-    )
+    logger.info("Interview websocket connected: ca_id=%s", candidate_assessment_id)
 
-    # Per-session orchestrator
-    compiled_graph = getattr(websocket.app.state, "compiled_graph", None)
     orchestrator = InterviewOrchestrator(
-        candidate_id=candidate_id,
-        assessment_id=assessment_id,
-        compiled_graph=compiled_graph,
+        candidate_assessment_id=candidate_assessment_id
     )
 
-    # Queue for server → client messages so outbound_task serialises all sends
     outbound_queue: asyncio.Queue[str | bytes | None] = asyncio.Queue()
 
-    # Acknowledge the connection
+    # Created immediately so early frontend audio chunks are not dropped.
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    session_state: dict[str, object] = {
+        "started": False,
+        "response_in_progress": False,
+    }
+
+    processing_lock = asyncio.Lock()
+
+    # bot_speaking_event: SET = bot is silent (candidate's turn)
+    #                     CLEARED = bot is speaking (candidate should wait)
+    bot_speaking_event = asyncio.Event()
+    bot_speaking_event.set()
+
+    audio_pipeline_task: asyncio.Task | None = None
+
     await outbound_queue.put(
         _server_msg(
             ServerMessageType.CONNECTION_ACK,
-            session_id=f"{candidate_id}:{assessment_id}",
-            message="Interview session established. Welcome to iBot!",
+            session_id=candidate_assessment_id,
+            message="Interview session connected. Click Start Interview when you are ready.",
         )
     )
 
-    # ── STT integration: audio chunks → transcripts → Graph ───────────────────
+    def current_state() -> InterviewState | None:
+        state = session_state.get("state")
+        return state if isinstance(state, dict) else None  # type: ignore
 
-    # Shared state
-    session_state: dict = {}
-    audio_pipeline_task: asyncio.Task | None = None
-    processing_lock = asyncio.Lock()
+    def cancel_watchdog() -> None:
+        task = session_state.pop("watchdog_task", None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
 
-    async def silence_watchdog() -> None:
+    async def silence_watchdog(delay: float) -> None:
         try:
-            await asyncio.sleep(15.0)
-            asyncio.create_task(_process_transcript("__SILENCE__"))
+            await bot_speaking_event.wait()
+            await asyncio.sleep(delay)
+
+            state = current_state()
+
+            if not state or _session_closed(state) or not session_state.get("started"):
+                return
+
+            await process_transcript("__SILENCE__")
+
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Silence watchdog failed")
 
     async def timeout_watchdog(total_budget_secs: int, total_elapsed: int) -> None:
         try:
-            remaining = total_budget_secs - total_elapsed
+            remaining = max(0, total_budget_secs - total_elapsed)
+
             if remaining > 0:
                 await asyncio.sleep(remaining)
-            asyncio.create_task(_process_transcript("__TIME_UP__"))
+
+            state = current_state()
+
+            if state and not _session_closed(state):
+                await process_transcript("__TIME_UP__")
+
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Timeout watchdog failed")
 
-    async def _process_transcript(combined_text: str) -> None:
-        """Submit the accumulated transcript to the LangGraph and relay the response."""
-        if combined_text not in ("__SILENCE__", "__TIME_UP__"):
-            wd = session_state.get("watchdog_task")
-            if wd and not wd.done():
-                wd.cancel()
+    def schedule_watchdog(state: InterviewState) -> None:
+        cancel_watchdog()
+
+        if _session_closed(state) or state.get("next_node") != "await_response":
+            return
+
+        delay = 15.0 if state.get("think_timer_active") else 5.0
+
+        session_state["watchdog_task"] = asyncio.create_task(
+            silence_watchdog(delay),
+            name="interview-silence-watchdog",
+        )
+
+    def schedule_timeout(state: InterviewState) -> None:
+        if session_state.get("timeout_task"):
+            return
+
+        total_budget = int(state.get("total_interview_allocated_secs") or 0)
+
+        if total_budget <= 0:
+            return
+
+        session_state["timeout_task"] = asyncio.create_task(
+            timeout_watchdog(
+                total_budget,
+                int(state.get("total_elapsed_secs") or 0),
+            ),
+            name="interview-timeout-watchdog",
+        )
+
+    # ── Core transcript → graph submission ────────────────────────────────
+    async def process_transcript(
+        text: str,
+        confidence: float | None = None,
+    ) -> None:
+        clean = (
+            " ".join((text or "").split())
+            if text not in {"__SILENCE__", "__TIME_UP__"}
+            else text
+        )
+
+        if not clean or not session_state.get("started"):
+            return
+
+        if clean not in {"__SILENCE__", "__TIME_UP__"}:
+            cancel_watchdog()
+
+        # ── Wait for the bot to finish speaking before responding ─────
+        # This is the core guard that prevents the bot from interrupting
+        # itself.  The wait is non-blocking for the *inbound_task*
+        # because process_transcript is only called from the audio
+        # pipeline (background) or from the inline text_message handler.
+        try:
+            await asyncio.wait_for(bot_speaking_event.wait(), timeout=60.0)
+        except TimeoutError:
+            logger.warning("Timed out waiting for bot to finish speaking")
+            bot_speaking_event.set()
+
+        session_state["response_in_progress"] = True
 
         async with processing_lock:
+            previous = current_state()
+
+            if previous is None:
+                session_state["response_in_progress"] = False
+                return
+
             try:
-                state = await orchestrator.submit_response(combined_text)
+                state = await orchestrator.submit_response(
+                    clean,
+                    stt_confidence=confidence,
+                )
 
-                # Extract bot reply from graph state
-                bot_text = state.get("bot_reply_text", "")
-                bot_type = state.get("bot_reply_type", "question")
-                turn_number = state.get("turn_number", 0)
+                session_state["state"] = state
 
-                # Send section info if it changed
-                await _send_section_info(outbound_queue, state)
+                await _send_graph_outputs(
+                    outbound_queue,
+                    previous,
+                    state,  # type: ignore
+                    bot_speaking_event,
+                )
 
-                # Send the bot reply
-                await _send_bot_reply(outbound_queue, bot_text, bot_type, turn_number)
-
-                # Check for session completion
-                session_status = state.get("session_status", "in_progress")
-                if session_status == "completed":
-                    await outbound_queue.put(
-                        _server_msg(ServerMessageType.INTERVIEW_COMPLETE)
-                    )
-                elif session_status == "terminated":
-                    await outbound_queue.put(
-                        _server_msg(ServerMessageType.SESSION_TERMINATED)
-                    )
-
-                # Sync state to Postgres asynchronously
-                asyncio.create_task(sync_interview_state(state))
-
-                # Trigger holistic evaluation if interview is over
-                if session_status in ("completed", "terminated"):
-                    asyncio.create_task(
-                        run_holistic_evaluation(orchestrator.assessment_id)
-                    )
-                else:
-                    session_state["watchdog_task"] = asyncio.create_task(
-                        silence_watchdog()
-                    )
+                if not _session_closed(state):  # type: ignore
+                    schedule_watchdog(state)  # type: ignore
 
             except Exception:
                 logger.exception("Graph processing failed")
@@ -294,88 +303,253 @@ async def interview_websocket(websocket: WebSocket) -> None:
                         message="AI response error. Please try again.",
                     )
                 )
+            finally:
+                session_state["response_in_progress"] = False
 
+    # ── Session lifecycle ─────────────────────────────────────────────────
+    async def start_or_resume() -> None:
+        async with processing_lock:
+            previous = current_state()
+
+            state = await orchestrator.resume_session()
+
+            if state is not None:
+                await outbound_queue.put(
+                    _server_msg(
+                        ServerMessageType.SESSION_RESUMED,
+                        turn_number=state.get("turn_number", 0),
+                        section_index=state.get("current_section_index", 0),
+                        section_name=state.get("current_section_name", "unknown"),
+                        message="Welcome back. Your interview session has been restored.",
+                    )
+                )
+            else:
+                state = await orchestrator.start_session()
+
+            session_state["state"] = state
+            session_state["started"] = True
+
+            await _send_graph_outputs(
+                outbound_queue,
+                previous,
+                state,  # type: ignore
+                bot_speaking_event,
+            )
+
+            schedule_watchdog(state)  # type: ignore
+            schedule_timeout(state)  # type: ignore
+
+    async def close_session() -> None:
+        cancel_watchdog()
+
+        async with processing_lock:
+            previous = current_state()
+
+            if previous is None or previous.get("closing_done"):
+                return
+
+            state = await orchestrator.close_session()
+
+            if state is not None:
+                session_state["state"] = state
+                await _send_graph_outputs(
+                    outbound_queue,
+                    previous,
+                    state,  # type: ignore
+                    bot_speaking_event,
+                )
+
+    # ── Audio pipeline (STT) ──────────────────────────────────────────────
     async def audio_pipeline() -> None:
-        """Drain the audio queue through Deepgram, then feed transcripts to Graph."""
-        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
         async def drain_audio(stt: STTService) -> None:
+            """Read audio chunks from the queue and feed them to Deepgram.
+            This must NEVER be blocked by bot_speaking_event — Deepgram
+            needs continuous audio to keep the connection alive."""
             while True:
                 chunk = await audio_queue.get()
+
                 if chunk is None:
                     break
+
                 await stt.send_audio(chunk)
 
         async def process_transcripts(stt: STTService) -> None:
             accumulated_text: list[str] = []
             timer_task: asyncio.Task | None = None
+            latest_confidence: float | None = None
 
-            async def wait_and_trigger() -> None:
+            def append_segment(segment: str) -> None:
+                clean = " ".join(segment.split())
+
+                if not clean:
+                    return
+
+                current = " ".join(accumulated_text).strip()
+
+                if clean == current or current.endswith(clean):
+                    return
+
+                if current and clean.startswith(current):
+                    accumulated_text.clear()
+                    accumulated_text.append(clean)
+                    return
+
+                accumulated_text.append(clean)
+
+            # ── Minimum commit delay (seconds) ────────────────────────
+            # All candidate turns wait at least this long after the last
+            # final STT segment before being committed to the graph.
+            COMMIT_DELAY_SECS = 1.5
+
+            async def wait_and_trigger(delay: float = COMMIT_DELAY_SECS) -> None:
+                nonlocal latest_confidence
+
                 try:
-                    await asyncio.sleep(3.0)
-                    if accumulated_text:
-                        combined_text = " ".join(accumulated_text)
-                        accumulated_text.clear()
-                        await outbound_queue.put(
-                            _server_msg(
-                                ServerMessageType.FINAL_TRANSCRIPT,
-                                text=combined_text,
-                            )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+                    # ── Wait for bot to finish speaking ───────────────
+                    # Instead of skipping the commit entirely (which
+                    # would lose the accumulated text), we *wait* for the
+                    # bot to finish, then commit.
+                    try:
+                        await asyncio.wait_for(bot_speaking_event.wait(), timeout=60.0)
+                    except TimeoutError:
+                        logger.warning("Commit: timed out waiting for bot to finish")
+                        bot_speaking_event.set()
+
+                    # Don't double-submit while another response is in flight
+                    if session_state.get("response_in_progress"):
+                        logger.debug("Skipping commit — response already in progress")
+                        return
+
+                    combined_text = " ".join(accumulated_text).strip()
+                    accumulated_text.clear()
+
+                    if not combined_text:
+                        return
+
+                    await outbound_queue.put(
+                        _server_msg(
+                            ServerMessageType.FINAL_TRANSCRIPT,
+                            text=combined_text,
                         )
-                        await _process_transcript(combined_text)
+                    )
+
+                    confidence = latest_confidence
+                    latest_confidence = None
+
+                    # Fire and forget so that if wait_and_trigger gets cancelled by a new STT event,
+                    # we don't cancel the running LangGraph execution.
+                    asyncio.create_task(
+                        process_transcript(
+                            combined_text,
+                            confidence=confidence,
+                        ),
+                        name="interview-process-transcript",
+                    )
+
                 except asyncio.CancelledError:
                     pass
 
             try:
                 async for event in stt.transcript_events():
-                    if event.text.strip():
-                        wd = session_state.get("watchdog_task")
-                        if wd and not wd.done():
-                            wd.cancel()
-                        session_state["watchdog_task"] = asyncio.create_task(
-                            silence_watchdog()
-                        )
+                    text = " ".join((event.text or "").split())
+
+                    # ── ALWAYS accumulate STT events ──────────────────
+                    # We never drop events.  Deepgram must always be fed
+                    # and its output must always be captured.  The
+                    # bot_speaking_event gate is only in wait_and_trigger
+                    # (commit) and process_transcript (graph submission).
+
+                    latest_confidence = getattr(
+                        event,
+                        "confidence",
+                        latest_confidence,
+                    )
+
+                    # Only cancel the silence watchdog if the bot is NOT
+                    # speaking (otherwise the bot's own audio echoed back
+                    # through the mic would cancel it).
+                    if text and bot_speaking_event.is_set():
+                        cancel_watchdog()
 
                     if timer_task and not timer_task.done():
                         timer_task.cancel()
 
                     if not event.is_final:
-                        current_partial = event.text
-                        display_text = " ".join(
-                            accumulated_text + [current_partial]
-                        ).strip()
-                        await outbound_queue.put(
-                            _server_msg(
-                                ServerMessageType.PARTIAL_TRANSCRIPT,
-                                text=display_text,
-                            )
-                        )
-                    else:
-                        if event.text.strip():
-                            accumulated_text.append(event.text.strip())
-                            display_text = " ".join(accumulated_text).strip()
+                        display_text = " ".join([*accumulated_text, text]).strip()
+
+                        if display_text and bot_speaking_event.is_set():
                             await outbound_queue.put(
                                 _server_msg(
                                     ServerMessageType.PARTIAL_TRANSCRIPT,
                                     text=display_text,
                                 )
                             )
-                            timer_task = asyncio.create_task(wait_and_trigger())
+
+                        continue
+
+                    if text:
+                        append_segment(text)
+
+                    display_text = " ".join(accumulated_text).strip()
+
+                    if display_text and bot_speaking_event.is_set():
+                        await outbound_queue.put(
+                            _server_msg(
+                                ServerMessageType.PARTIAL_TRANSCRIPT,
+                                text=display_text,
+                            )
+                        )
+
+                    # Only schedule the commit timer if there is text.
+                    # We always schedule it. If the bot is speaking, wait_and_trigger
+                    # will pause at `await bot_speaking_event.wait()` and commit
+                    # after the bot finishes.
+                    if accumulated_text:
+                        timer_task = asyncio.create_task(
+                            wait_and_trigger(COMMIT_DELAY_SECS)
+                        )
+
             finally:
                 if timer_task and not timer_task.done():
                     timer_task.cancel()
 
-        # Expose the audio_queue to inbound_task via shared session state
-        session_state["audio_queue"] = audio_queue
+        def _detect_encoding(chunk: bytes) -> tuple[str | None, str | int | None]:
+            """Sniff the first audio chunk to pick Deepgram stream config."""
+            if chunk[:4] in (b"\x1a\x45\xdf\xa3", b"OggS", b"RIFF"):
+                logger.info(
+                    "Detected container audio (WebM/Ogg/WAV); using Deepgram auto-detect"
+                )
+                return None, None
+            logger.info("Assuming raw linear16 PCM browser audio")
+            return "linear16", 16000
 
-        async with STTService() as stt:
+        # Wait for the first audio chunk before connecting to Deepgram.
+        # This avoids the "no audio within timeout" error that occurs when
+        # the STT connection is opened before the browser starts streaming.
+        logger.info("Audio pipeline ready; waiting for first audio chunk")
+        first_chunk = await audio_queue.get()
+        if first_chunk is None:
+            return
+
+        encoding, sample_rate = _detect_encoding(first_chunk)
+
+        async with STTService(encoding=encoding, sample_rate=sample_rate) as stt:
+            # Send the first chunk that we already consumed
+            await stt.send_audio(first_chunk)
+            logger.info(
+                "First audio chunk sent to Deepgram: bytes=%d encoding=%s",
+                len(first_chunk),
+                encoding or "auto",
+            )
             await asyncio.gather(
                 drain_audio(stt),
                 process_transcripts(stt),
             )
 
-    # ── inbound task ──────────────────────────────────────────────────────────
-
+    # ── Inbound task (reads WebSocket frames) ─────────────────────────────
     async def inbound_task() -> None:
         nonlocal audio_pipeline_task
 
@@ -383,30 +557,28 @@ async def interview_websocket(websocket: WebSocket) -> None:
             try:
                 frame = await websocket.receive()
             except WebSocketDisconnect:
-                logger.info("Client disconnected: candidate=%s", candidate_id)
                 break
 
             if frame.get("type") == "websocket.disconnect":
                 break
 
-            # Binary frame — raw audio from the always-on microphone
-            if "bytes" in frame and frame["bytes"]:
-                aq = session_state.get("audio_queue")
-                if aq is not None:
-                    await aq.put(frame["bytes"])
+            # Audio chunks — always forward to audio_queue immediately
+            if frame.get("bytes"):
+                await audio_queue.put(frame["bytes"])
                 continue
 
-            if "text" not in frame or not frame["text"]:
+            raw_text = frame.get("text")
+
+            if not raw_text:
                 continue
 
-            # Parse control message
             try:
-                data = json.loads(frame["text"])
-                msg = ClientMessage.model_validate(data)
+                msg = ClientMessage.model_validate(json.loads(raw_text))
             except Exception:
                 await outbound_queue.put(
                     _server_msg(
-                        ServerMessageType.ERROR, message="Invalid message format."
+                        ServerMessageType.ERROR,
+                        message="Invalid message format.",
                     )
                 )
                 continue
@@ -414,128 +586,93 @@ async def interview_websocket(websocket: WebSocket) -> None:
             if msg.type == ClientMessageType.PING:
                 await outbound_queue.put(_server_msg(ServerMessageType.PONG))
 
-            elif msg.type in (
+            elif msg.type in {
                 ClientMessageType.SESSION_START,
                 ClientMessageType.SESSION_RESUME,
-            ):
-                # Start the always-on audio pipeline
+            }:
                 if audio_pipeline_task is None or audio_pipeline_task.done():
-                    audio_pipeline_task = asyncio.create_task(audio_pipeline())
-
-                # ── Reconnection: try to resume from checkpoint first ─────
-                try:
-                    resumed = await _handle_session_resume(orchestrator, outbound_queue)
-
-                    if not resumed:
-                        # No valid checkpoint → start fresh
-                        state = await orchestrator.start_session()
-
-                        # Send section info
-                        await _send_section_info(outbound_queue, state)
-
-                        # Send the opening monologue
-                        opening_text = state.get("bot_reply_text", "")
-                        if opening_text:
-                            await _send_bot_reply(
-                                outbound_queue,
-                                opening_text,
-                                "opening",
-                                turn_number=0,
-                            )
-
-                        # Sync initial state to Postgres
-                        asyncio.create_task(sync_interview_state(state))
-
-                    # start timeout watchdog
-                    current_state = await orchestrator.get_current_state()
-                    if current_state and "timeout_task" not in session_state:
-                        plan = current_state.get("interview_plan", {})
-                        total_budget_secs = plan.get("total_mins", 0) * 60
-                        total_elapsed = current_state.get("total_elapsed_secs", 0)
-                        if total_budget_secs > 0:
-                            session_state["timeout_task"] = asyncio.create_task(
-                                timeout_watchdog(total_budget_secs, total_elapsed)
-                            )
-
-                    session_state["watchdog_task"] = asyncio.create_task(
-                        silence_watchdog()
+                    audio_pipeline_task = asyncio.create_task(
+                        audio_pipeline(),
+                        name="interview-audio-pipeline",
                     )
 
-                except Exception:
-                    logger.exception("Failed to start/resume interview session")
-                    await outbound_queue.put(
-                        _server_msg(
-                            ServerMessageType.ERROR,
-                            message="Failed to initialise interview. Please try again.",
-                        )
+                # ── CRITICAL: launch as background task ───────────────
+                # start_or_resume calls _send_bot_reply which clears
+                # bot_speaking_event.  We must NOT await it inline
+                # because inbound_task must keep reading WebSocket
+                # frames (especially audio) without stalling.
+                if not session_state.get("started"):
+                    asyncio.create_task(
+                        _safe_start_or_resume(),
+                        name="interview-start-or-resume",
                     )
 
             elif msg.type == ClientMessageType.TEXT_MESSAGE:
-                # Handle typed text input as if it were a transcript
-                text = msg.payload.get("text", "").strip()
+                text = str(msg.payload.get("text") or "").strip()
+
                 if text:
-                    await _process_transcript(text)
+                    await outbound_queue.put(
+                        _server_msg(
+                            ServerMessageType.FINAL_TRANSCRIPT,
+                            text=text,
+                        )
+                    )
+                    # Also launch as background so inbound loop stays free
+                    asyncio.create_task(
+                        process_transcript(text),
+                        name="interview-text-response",
+                    )
 
             elif msg.type == ClientMessageType.STOP:
-                logger.info("Stop received from candidate=%s", candidate_id)
+                await close_session()
                 break
 
-        # ── Disconnect cleanup ────────────────────────────────────────────────
-        # Pause the session for potential reconnection (grace period)
-        try:
-            current_state = await orchestrator.get_current_state()
-            if current_state:
-                status = current_state.get("session_status", "")
-                if status == "in_progress":
-                    await orchestrator.pause_session()
-                    # Sync paused state to Postgres
-                    paused_state = await orchestrator.get_current_state()
-                    if paused_state:
-                        asyncio.create_task(sync_interview_state(paused_state))
-
-                    logger.info(
-                        "Session paused for reconnection: assessment=%s",
-                        assessment_id,
-                    )
-        except Exception:
-            logger.exception("Failed to pause session on disconnect")
-
-        # Signal outbound to finish and stop audio pipeline
         await outbound_queue.put(None)
-        aq = session_state.get("audio_queue")
-        if aq is not None:
-            await aq.put(None)
+        await audio_queue.put(None)
 
-        wd = session_state.get("watchdog_task")
-        if wd and not wd.done():
-            wd.cancel()
+        cancel_watchdog()
 
-        td = session_state.get("timeout_task")
-        if td and not td.done():
-            td.cancel()
+        timeout = session_state.get("timeout_task")
 
-    # ── outbound task ─────────────────────────────────────────────────────────
+        if isinstance(timeout, asyncio.Task) and not timeout.done():
+            timeout.cancel()
 
+    async def _safe_start_or_resume() -> None:
+        """Wrapper so start_or_resume exceptions don't crash the event loop."""
+        try:
+            await start_or_resume()
+        except Exception:
+            logger.exception("Failed to start/resume interview session")
+            await outbound_queue.put(
+                _server_msg(
+                    ServerMessageType.ERROR,
+                    message="Failed to initialise interview. Please try again.",
+                )
+            )
+
+    # ── Outbound task (sends WebSocket frames) ────────────────────────────
     async def outbound_task() -> None:
         while True:
             item = await outbound_queue.get()
+
             if item is None:
                 break
+
             try:
                 if isinstance(item, bytes):
                     await websocket.send_bytes(item)
                 else:
                     await websocket.send_text(item)
+
             except WebSocketDisconnect:
                 break
             except Exception:
-                logger.exception("Error sending frame to client")
-
-    # ── run both tasks concurrently ───────────────────────────────────────────
+                logger.exception("Error sending interview websocket frame")
+                break
 
     tasks = {
-        asyncio.create_task(inbound_task(), name="inbound"),
-        asyncio.create_task(outbound_task(), name="outbound"),
+        asyncio.create_task(inbound_task(), name="interview-inbound"),
+        asyncio.create_task(outbound_task(), name="interview-outbound"),
     }
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -552,10 +689,15 @@ async def interview_websocket(websocket: WebSocket) -> None:
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception:
-            logger.exception("Unhandled error in interview session task")
+            logger.exception("Unhandled interview websocket task error")
 
-    logger.info(
-        "Interview session closed: candidate=%s assessment=%s",
-        candidate_id,
-        assessment_id,
-    )
+    try:
+        state = current_state()
+
+        if state and not state.get("closing_done"):
+            await orchestrator.pause_session()
+
+    except Exception:
+        logger.exception("Failed to pause interview session on disconnect")
+
+    logger.info("Interview websocket disconnected: ca_id=%s", candidate_assessment_id)

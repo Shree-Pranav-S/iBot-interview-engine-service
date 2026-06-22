@@ -16,6 +16,23 @@ from src.config.settings import settings
 logger = logging.getLogger(__name__)
 
 _DEEPGRAM_TTS_URL = "https://api.deepgram.com/v1/speak"
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return the shared TTS HTTP client."""
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=30.0)
+    return _client
+
+
+async def close_tts_client() -> None:
+    """Close the shared TTS HTTP client during app shutdown."""
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
 
 
 async def synthesize_speech(text: str) -> bytes:
@@ -41,13 +58,12 @@ async def synthesize_speech(text: str) -> bytes:
     params = {"model": settings.DEEPGRAM_TTS_MODEL}
     body = {"text": text}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            _DEEPGRAM_TTS_URL,
-            headers=headers,
-            params=params,
-            json=body,
-        )
+    response = await _get_client().post(
+        _DEEPGRAM_TTS_URL,
+        headers=headers,
+        params=params,
+        json=body,
+    )
 
     if response.status_code != 200:
         logger.error(
@@ -62,4 +78,5 @@ async def synthesize_speech(text: str) -> bytes:
         len(response.content),
         len(text),
     )
+
     return response.content

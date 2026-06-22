@@ -20,19 +20,20 @@ class Settings(BaseSettings):
 
     # ── Deepgram (STT + TTS) ──────────────────────────────────────────────────
     DEEPGRAM_API_KEY: str = Field(default="")
-    DEEPGRAM_STT_MODEL: str = Field(default="nova-2")
+    DEEPGRAM_STT_MODEL: str = Field(default="nova-3")
     DEEPGRAM_TTS_MODEL: str = Field(default="aura-asteria-en")
 
     # ── Groq (LLM) ───────────────────────────────────────────────────────────
     GROQ_API_KEY: str = Field(default="")
+    FALLBACK_GROQ_API_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    GROQ_MAX_TOKENS: int = Field(default=512)
-    GROQ_TEMPERATURE: float = Field(default=0.7)
+    GROQ_MAX_TOKENS: int = Field(default=400)
+    GROQ_TEMPERATURE: float = Field(default=0.3)
 
     # ── Groq Evaluation Model ────────────────────────────────────────────────
     GROQ_EVAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
     GROQ_EVAL_MAX_TOKENS: int = Field(default=1024)
-    GROQ_EVAL_TEMPERATURE: float = Field(default=0.3)
+    GROQ_EVAL_TEMPERATURE: float = Field(default=0.1)
 
     # ── Groq Classification Model ────────────────────────────────────────────
     GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")

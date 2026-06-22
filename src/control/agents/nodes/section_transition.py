@@ -1,241 +1,117 @@
-"""
-section_transition_node — Manages transitions between interview sections.
-
-Handles:
-1. Marking the current section as complete
-2. Redistributing unused time to remaining sections (proportional to priority)
-3. Generating a natural-sounding transition phrase via LLM
-4. Resetting per-section counters (used_concepts, consecutive scores, etc.)
-5. Routing to interview_complete when all sections are done
-
-Time management:
-  - If a section finishes early, its leftover time is redistributed
-    proportionally by priority_score to the remaining sections.
-  - If a section runs over, the deficit is absorbed from remaining
-    sections (also proportional to priority).
-"""
+"""Section transition node."""
 
 from __future__ import annotations
 
 import logging
-
-from groq import AsyncGroq
-from tenacity import retry, stop_after_attempt, wait_fixed
+import time
 
 from src.config.settings import settings
-from src.control.agents.state import InterviewState, SectionState
+from src.control.agents.llm import groq_complete
+from src.control.agents.prompts import trim_to_2_sentences
+from src.control.agents.state import InterviewState
 
 logger = logging.getLogger(__name__)
 
-
-_TRANSITION_SYSTEM_PROMPT = """\
-You are a senior technical interviewer conducting a live voice interview. \
-You just finished one section and are about to start another.
-
-Generate a natural spoken transition between sections. Rules:
-- Keep it to 2 sentences maximum. This is spoken aloud via TTS.
-- Briefly acknowledge the section you're leaving (1 short phrase).
-- Introduce the next section warmly. Sound like a real interviewer, not a script.
-- Do NOT use bullet points, markdown, or numbered lists.
-- Vary your style. Don't always say "Great, let's move on."
-- Examples of natural transitions:
-  "Good stuff on the Python side. Let's shift gears and talk about system design."
-  "Alright, I've got a good sense of your backend skills. Now I'd love to hear about how you approach problem solving."
-  "Nice, thanks for walking me through that. So, switching topics a bit..."
+_TRANSITION_SYSTEM = """\
+You are a senior interviewer transitioning between interview sections. Generate a natural spoken transition.
+Keep it to 1-2 sentences. Acknowledge the section just completed and introduce the next section warmly.
+No markdown, no bullets, no evaluation.
 """
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
-async def _generate_transition(
-    from_section: str,
-    to_section: str,
-    to_skill: str,
-) -> str:
-    """Generate a natural-sounding section transition via LLM."""
-    client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-    completion = await client.chat.completions.create(
-        model=settings.GROQ_CLASSIFY_MODEL,  # Fast 8b model for transitions
-        messages=[
-            {"role": "system", "content": _TRANSITION_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Transitioning from: {from_section}\n"
-                    f"Moving to: {to_section} (skill area: {to_skill})\n"
-                    f"Generate the transition now."
-                ),
-            },
-        ],
-        max_tokens=128,
-        temperature=0.8,
-    )
-    return (completion.choices[0].message.content or "").strip()
+def _fallback(previous: str, next_name: str, next_skill: str | None) -> str:
+    prev = previous.lower()
+    nxt = next_name.lower()
+    if prev == "self_intro":
+        return "Thank you for that introduction. Let's move into the role-specific questions now."
+    if nxt in {"behavioural", "behavioral"}:
+        return "Good, let's shift gears and talk about your work style and past experiences."
+    if nxt == "cultural":
+        return (
+            "Thanks, let's finish with a quick look at team fit and work preferences."
+        )
+    if next_skill:
+        return f"Good, let's move on to {next_skill}."
+    return "Great, let's move on to the next area of the interview."
 
 
-def _redistribute_time(
-    sections: list[SectionState],
-    current_idx: int,
-    leftover_secs: int,
-) -> list[SectionState]:
-    """
-    Redistribute leftover time (positive or negative) from the current
-    section to remaining incomplete sections, proportional to priority.
-
-    Returns a new list of sections with updated time_budget_secs.
-    """
-    updated = list(sections)
-    remaining_indices = [
-        i
-        for i in range(current_idx + 1, len(sections))
-        if not sections[i].get("is_complete", False)
-    ]
-
-    if not remaining_indices or leftover_secs == 0:
-        return updated
-
-    # Sum of priority scores for remaining sections
-    total_priority = sum(
-        sections[i].get("priority_score", 5) for i in remaining_indices
-    )
-    if total_priority == 0:
-        total_priority = len(remaining_indices)  # Equal split fallback
-
-    for i in remaining_indices:
-        priority = sections[i].get("priority_score", 5)
-        fraction = priority / total_priority
-        time_delta = int(leftover_secs * fraction)
-
-        sec = sections[i]
-        new_budget = max(
-            60,  # Minimum 1 minute per section
-            sec.get("time_budget_secs", 300) + time_delta,
+async def section_transition(state: InterviewState) -> dict:
+    sections = [dict(section) for section in state.get("sections") or []]
+    current_idx = int(state.get("current_section_index") or 0)
+    now = time.time()
+    if current_idx < len(sections):
+        sections[current_idx]["is_complete"] = True
+        sections[current_idx]["time_elapsed_secs"] = int(
+            now - float(state.get("section_started_at") or now)
         )
 
-        updated[i] = SectionState(
-            name=sec.get("name", ""),
-            skill=sec.get("skill", ""),
-            priority_score=sec.get("priority_score", 5),
-            time_budget_secs=new_budget,
-            time_elapsed_secs=sec.get("time_elapsed_secs", 0),
-            questions_asked=sec.get("questions_asked", 0),
-            concepts_covered=list(sec.get("concepts_covered", [])),
-            is_complete=sec.get("is_complete", False),
-        )
-
-    return updated
-
-
-async def section_transition_node(state: InterviewState) -> dict:
-    """
-    Transition to the next interview section.
-
-    1. Marks the current section as complete.
-    2. Calculates leftover time and redistributes to remaining sections.
-    3. Generates a natural-sounding spoken transition.
-    4. Resets per-section counters.
-    5. Routes to interview_complete if all sections are exhausted.
-    """
-    sections = state.get("sections", [])
-    current_idx = state.get("current_section_index", 0)
     next_idx = current_idx + 1
-    time_remaining = state.get("current_section_time_remaining_secs", 0)
-
-    # Check for global time exhaustion
-    total_elapsed = state.get("total_elapsed_secs", 0)
-    interview_plan = state.get("interview_plan", {})
-    total_budget_secs = interview_plan.get("total_mins", 0) * 60
-
-    if total_budget_secs > 0 and total_elapsed >= total_budget_secs:
-        logger.info("Total interview time exceeded — routing to interview_complete")
-        return {
-            "session_status": "completed",
-            "bot_reply_text": (
-                "That covers everything I wanted to explore today. "
-                "Let me wrap up the interview."
-            ),
-            "bot_reply_type": "transition",
-        }
-
-    # All sections done → route to interview_complete
     if next_idx >= len(sections):
-        logger.info("No more sections — routing to interview_complete")
         return {
-            "session_status": "completed",
-            "bot_reply_text": (
-                "That covers everything I wanted to explore today. "
-                "Let me wrap up the interview."
-            ),
-            "bot_reply_type": "transition",
+            "sections": sections,
+            "current_section_index": next_idx,
+            "should_close": True,
+            "session_status": "COMPLETED",
+            "next_node": "closing",
         }
 
-    # Mark current section complete
-    current_sec = sections[current_idx]
-    completed_section: SectionState = {
-        "name": current_sec.get("name", ""),
-        "skill": current_sec.get("skill", ""),
-        "priority_score": current_sec.get("priority_score", 5),
-        "time_budget_secs": current_sec.get("time_budget_secs", 300),
-        "time_elapsed_secs": (
-            current_sec.get("time_budget_secs", 300) - time_remaining
-        ),
-        "questions_asked": current_sec.get("questions_asked", 0),
-        "concepts_covered": list(current_sec.get("concepts_covered", [])),
-        "is_complete": True,
-    }
-
-    # Redistribute leftover time
-    updated_sections = list(sections)
-    updated_sections[current_idx] = completed_section
-
-    if time_remaining > 0:
-        logger.info(
-            "Section '%s' finished with %ds leftover — redistributing",
-            current_sec.get("name", "?"),
-            time_remaining,
-        )
-        updated_sections = _redistribute_time(
-            updated_sections, current_idx, time_remaining
-        )
-    elif time_remaining < 0:
-        # Section ran over — absorb deficit from remaining
-        logger.info(
-            "Section '%s' ran over by %ds — absorbing from remaining",
-            current_sec.get("name", "?"),
-            abs(time_remaining),
-        )
-        updated_sections = _redistribute_time(
-            updated_sections, current_idx, time_remaining
-        )
-
-    next_section = updated_sections[next_idx]
-    from_name = current_sec.get("name", "the previous section")
-    to_name = next_section.get("name", "the next section")
-    to_skill = next_section.get("skill", "general")
-
-    reply = await _generate_transition(from_name, to_name, to_skill)
-    if not reply or len(reply) < 10:
-        raise ValueError("Transition text too short")
-
-    logger.info(
-        "Section transition: '%s' → '%s' (next budget: %ds)",
-        from_name,
-        to_name,
-        next_section.get("time_budget_secs", 300),
+    previous = str(state.get("current_section_name") or "")
+    next_section = sections[next_idx]
+    next_name = str(
+        next_section.get("section_name") or next_section.get("name") or "general"
     )
+    next_skill = str(next_section.get("skill") or "") or None
+    try:
+        text = await groq_complete(
+            system=_TRANSITION_SYSTEM,
+            user=f"From section: {previous}\nTo section: {next_name}\nNext skill: {next_skill or 'general'}\nGenerate the transition.",
+            max_tokens=120,
+            temperature=0.7,
+            model=settings.GROQ_CLASSIFY_MODEL,
+        )
+        text = text.strip()
+        if len(text) < 10:
+            raise ValueError("Transition too short")
+    except Exception:
+        logger.exception("Transition generation failed; using fallback")
+        text = _fallback(previous, next_name, next_skill)
+    text = trim_to_2_sentences(text)
 
+    turn_number = int(state.get("turn_number") or 0) + 1
+    turn = {
+        "turn_number": turn_number,
+        "speaker": "bot",
+        "text": text,
+        "tone": "neutral",
+        "section": next_name,
+        "turn_type": "transition",
+        "type": "transition",
+        "from_section": previous,
+        "to_section": next_name,
+        "timestamp": now,
+    }
     return {
-        "sections": updated_sections,
+        "sections": sections,
         "current_section_index": next_idx,
-        "current_section_time_remaining_secs": next_section.get(
-            "time_budget_secs", 300
+        "current_section_name": next_name,
+        "section_started_at": now,
+        "section_allocated_secs": float(next_section.get("time_budget_secs") or 60),  # type: ignore
+        "current_section_time_remaining_secs": int(  # type: ignore
+            next_section.get("time_budget_secs") or 60
         ),
-        "current_question_difficulty": "medium",
-        # Reset per-section counters
-        "consecutive_strong": 0,
-        "consecutive_weak": 0,
+        "questions_asked_in_section": 0,
+        "concepts_covered_in_section": [],
         "used_concepts": [],
-        "silence_attempt": 0,
-        "irrelevant_strike_count": 0,
-        "bot_reply_text": reply,
+        "current_difficulty_level": 1,
+        "next_question_mode": "normal",
+        "last_question_was_weak_retry": False,
+        "turn_number": turn_number,
+        "last_bot_text": text,
+        "bot_reply_text": text,
         "bot_reply_type": "transition",
+        "candidate_raw_text": "",
+        "response_class": None,
+        "silence_state": {},
+        "transcript": [turn],
+        "next_node": "generate_question",
     }

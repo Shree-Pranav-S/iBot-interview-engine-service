@@ -67,7 +67,7 @@ class AnswerEvaluation(Base):
     # The exact question the bot asked before this answer
     question_text: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # The candidate answer as transcribed by Deepgram Nova-3.
+    # The candidate answer as transcribed by Deepgram Flux.
     # Empty string for silence turns.
     # Actual transcript of what was said for irrelevant turns.
     answer_text: Mapped[str] = mapped_column(Text, nullable=False)

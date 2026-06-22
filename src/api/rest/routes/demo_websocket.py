@@ -69,42 +69,55 @@ async def demo_interview_websocket(websocket: WebSocket) -> None:
             accumulated_text: list[str] = []
             timer_task: asyncio.Task | None = None
 
-            async def wait_and_trigger() -> None:
+            async def wait_and_trigger(delay: float = 3.0) -> None:
                 try:
-                    await asyncio.sleep(3.0)
-                    if accumulated_text:
-                        combined_text = " ".join(accumulated_text)
-                        accumulated_text.clear()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    if not accumulated_text:
+                        return
+                    combined_text = " ".join(accumulated_text).strip()
+                    accumulated_text.clear()
+                    if not combined_text:
+                        return
+
+                    # Commit the accumulated text to a single final box on the frontend
+                    await outbound_queue.put(
+                        _server_msg(
+                            ServerMessageType.FINAL_TRANSCRIPT,
+                            text=combined_text,
+                        )
+                    )
+
+                    try:
+                        # Use DemoBot static response
+                        reply = await demo_bot.get_reply(combined_text)
+                        await outbound_queue.put(
+                            _server_msg(
+                                ServerMessageType.ASSISTANT_TEXT,
+                                text=reply,
+                            )
+                        )
+                        # Generate TTS
                         try:
-                            # Use DemoBot static response
-                            reply = await demo_bot.get_reply(combined_text)
+                            audio_bytes = await synthesize_speech(reply)
                             await outbound_queue.put(
                                 _server_msg(
-                                    ServerMessageType.ASSISTANT_TEXT,
-                                    text=reply,
+                                    ServerMessageType.TTS_AUDIO,
+                                    encoding="mp3",
+                                    size=len(audio_bytes),
                                 )
                             )
-                            # Generate TTS
-                            try:
-                                audio_bytes = await synthesize_speech(reply)
-                                await outbound_queue.put(
-                                    _server_msg(
-                                        ServerMessageType.TTS_AUDIO,
-                                        encoding="mp3",
-                                        size=len(audio_bytes),
-                                    )
-                                )
-                                await outbound_queue.put(audio_bytes)
-                            except Exception:
-                                logger.exception("TTS synthesis failed in demo")
+                            await outbound_queue.put(audio_bytes)
                         except Exception:
-                            logger.exception("Demo bot reply generation failed")
-                            await outbound_queue.put(
-                                _server_msg(
-                                    ServerMessageType.ERROR,
-                                    message="Demo bot response error.",
-                                )
+                            logger.exception("TTS synthesis failed in demo")
+                    except Exception:
+                        logger.exception("Demo bot reply generation failed")
+                        await outbound_queue.put(
+                            _server_msg(
+                                ServerMessageType.ERROR,
+                                message="Demo bot response error.",
                             )
+                        )
                 except asyncio.CancelledError:
                     pass
 
@@ -113,23 +126,37 @@ async def demo_interview_websocket(websocket: WebSocket) -> None:
                     if timer_task and not timer_task.done():
                         timer_task.cancel()
 
+                    text = event.text.strip()
+
                     if not event.is_final:
+                        display_text = " ".join([*accumulated_text, text]).strip()
+                        if display_text:
+                            await outbound_queue.put(
+                                _server_msg(
+                                    ServerMessageType.PARTIAL_TRANSCRIPT,
+                                    text=display_text,
+                                )
+                            )
+                        continue
+
+                    # Final events: segment_final, speech_final, or utterance_end
+                    if text:
+                        accumulated_text.append(text)
+
+                    # Keep the UI box partial until the turn is explicitly processed
+                    display_text = " ".join(accumulated_text).strip()
+                    if display_text:
                         await outbound_queue.put(
                             _server_msg(
-                                ServerMessageType.PARTIAL_TRANSCRIPT,
-                                text=event.text,
+                                ServerMessageType.PARTIAL_TRANSCRIPT, text=display_text
                             )
                         )
+
+                    event_type = getattr(event, "event_type", "")
+                    if event_type == "utterance_end":
+                        timer_task = asyncio.create_task(wait_and_trigger(0.2))
                     else:
-                        await outbound_queue.put(
-                            _server_msg(
-                                ServerMessageType.FINAL_TRANSCRIPT,
-                                text=event.text,
-                            )
-                        )
-                        if event.text.strip():
-                            accumulated_text.append(event.text.strip())
-                            timer_task = asyncio.create_task(wait_and_trigger())
+                        timer_task = asyncio.create_task(wait_and_trigger(2.5))
             finally:
                 if timer_task and not timer_task.done():
                     timer_task.cancel()
@@ -217,6 +244,37 @@ async def demo_interview_websocket(websocket: WebSocket) -> None:
             elif msg.type == ClientMessageType.STOP:
                 logger.info("Demo stop received from candidate=%s", candidate_id)
                 break
+
+            elif msg.type == ClientMessageType.TEXT_MESSAGE:
+                text = msg.payload.get("text", "").strip()
+                if text:
+                    try:
+                        reply = await demo_bot.get_reply(text)
+                        await outbound_queue.put(
+                            _server_msg(ServerMessageType.ASSISTANT_TEXT, text=reply)
+                        )
+                        try:
+                            audio_bytes = await synthesize_speech(reply)
+                            await outbound_queue.put(
+                                _server_msg(
+                                    ServerMessageType.TTS_AUDIO,
+                                    encoding="mp3",
+                                    size=len(audio_bytes),
+                                )
+                            )
+                            await outbound_queue.put(audio_bytes)
+                        except Exception:
+                            logger.exception(
+                                "TTS synthesis failed in demo text message"
+                            )
+                    except Exception:
+                        logger.exception("Demo bot reply generation failed for text")
+                        await outbound_queue.put(
+                            _server_msg(
+                                ServerMessageType.ERROR,
+                                message="Demo bot response error.",
+                            )
+                        )
 
         # Cleanup
         await outbound_queue.put(None)

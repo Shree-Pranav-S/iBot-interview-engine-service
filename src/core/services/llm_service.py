@@ -1,77 +1,164 @@
 """
-LLM service using Groq's chat completion API (non-streaming for this pass).
+LLM Service — Centralised Groq client for all interview graph nodes.
 
-Maintains a per-session conversation history and returns the full
-assistant reply as a string.
+Provides a singleton AsyncGroq client (reused across the entire application
+lifecycle) and typed helper methods for each LLM task:
+  - classify()     → fast 8B model, low tokens
+  - evaluate()     → 70B model, structured JSON
+  - generate()     → 70B model, question generation
+  - lightweight()  → fast 8B model, short free-form completions
+
+Reusing a single client avoids per-call HTTP connection-pool creation,
+saving ~100-300ms per graph turn.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from groq import AsyncGroq
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = (
-    "You are iBot, an intelligent AI interview assistant. "
-    "Your role is to conduct a professional job interview by asking clear, relevant questions "
-    "one at a time, evaluating candidate responses, and keeping a conversational yet professional tone. "
-    "Keep your responses concise (2-4 sentences maximum) so they are natural in a voice conversation."
-)
+# ── Singleton client ──────────────────────────────────────────────────────────
+
+_client: AsyncGroq | None = None
+_fallback_client: AsyncGroq | None = None
 
 
-class LLMService:
-    """
-    Stateful LLM session that preserves conversation history for a single interview.
-
-    Usage:
-        llm = LLMService(candidate_id="...", assessment_id="...")
-        reply = await llm.get_reply("Tell me about yourself.")
-    """
-
-    def __init__(self, candidate_id: str, assessment_id: str) -> None:
-        self._candidate_id = candidate_id
-        self._assessment_id = assessment_id
-        self._client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        self._history: list[dict[str, Any]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-        ]
-
-    async def get_reply(self, user_text: str) -> str:
-        """
-        Append user_text to conversation history, call Groq, and return the reply.
-
-        Args:
-            user_text: The candidate's transcribed or typed message.
-
-        Returns:
-            The assistant's reply text.
-        """
-        self._history.append({"role": "user", "content": user_text})
-
-        try:
-            completion = await self._client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=self._history,  # type: ignore[arg-type]
-                max_tokens=settings.GROQ_MAX_TOKENS,
-                temperature=settings.GROQ_TEMPERATURE,
+def _get_client(use_fallback: bool = False) -> AsyncGroq:
+    """Return (and lazily create) the singleton primary or fallback AsyncGroq client."""
+    global _client, _fallback_client
+    if use_fallback:
+        if _fallback_client is None:
+            _fallback_client = AsyncGroq(
+                api_key=settings.FALLBACK_GROQ_API_KEY,
+                timeout=10.0,
             )
-            reply: str = completion.choices[0].message.content or ""
-            self._history.append({"role": "assistant", "content": reply})
-            logger.debug(
-                "Groq reply for candidate=%s: %s",
-                self._candidate_id,
-                reply[:80],
+        return _fallback_client
+    else:
+        if _client is None:
+            _client = AsyncGroq(
+                api_key=settings.GROQ_API_KEY,
+                timeout=10.0,
             )
-            return reply
-        except Exception as exc:
-            logger.exception("Groq LLM error for candidate=%s", self._candidate_id)
-            raise RuntimeError(f"LLM call failed: {exc}") from exc
+        return _client
 
-    def clear_history(self) -> None:
-        """Reset conversation to just the system prompt."""
-        self._history = [{"role": "system", "content": _SYSTEM_PROMPT}]
+
+# ── Typed helpers ─────────────────────────────────────────────────────────────
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def classify(messages: list[dict]) -> str:
+    """Call the fast classification model (8B). Returns raw text."""
+    try:
+        client = _get_client(use_fallback=False)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_CLASSIFY_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
+            temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
+        )
+    except Exception as e:
+        logger.warning(
+            "Groq classify failed with primary API key: %s. Retrying with fallback...",
+            e,
+        )
+        client = _get_client(use_fallback=True)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_CLASSIFY_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
+            temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
+        )
+    return completion.choices[0].message.content or ""
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def evaluate(messages: list[dict]) -> str:
+    """Call the evaluation model (70B) with JSON output. Returns raw JSON string."""
+    try:
+        client = _get_client(use_fallback=False)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_EVAL_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_EVAL_MAX_TOKENS,
+            temperature=settings.GROQ_EVAL_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        logger.warning(
+            "Groq evaluate failed with primary API key: %s. Retrying with fallback...",
+            e,
+        )
+        client = _get_client(use_fallback=True)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_EVAL_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_EVAL_MAX_TOKENS,
+            temperature=settings.GROQ_EVAL_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    return completion.choices[0].message.content or ""
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def generate(messages: list[dict]) -> str:
+    """Call the main generation model (70B) with JSON output. Returns raw JSON string."""
+    try:
+        client = _get_client(use_fallback=False)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_MAX_TOKENS,
+            temperature=settings.GROQ_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        logger.warning(
+            "Groq generate failed with primary API key: %s. Retrying with fallback...",
+            e,
+        )
+        client = _get_client(use_fallback=True)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_MAX_TOKENS,
+            temperature=settings.GROQ_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    return completion.choices[0].message.content or ""
+
+
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
+async def lightweight(
+    messages: list[dict],
+    *,
+    max_tokens: int = 192,
+    temperature: float = 0.3,
+    json_mode: bool = False,
+) -> str:
+    """Call the fast 8B model for short completions (rephrase, transition, closing, etc.)."""
+    kwargs: dict = {
+        "model": settings.GROQ_CLASSIFY_MODEL,
+        "messages": messages,  # type: ignore[arg-type]
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    try:
+        client = _get_client(use_fallback=False)
+        completion = await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        logger.warning(
+            "Groq lightweight failed with primary API key: %s. Retrying with fallback...",
+            e,
+        )
+        client = _get_client(use_fallback=True)
+        completion = await client.chat.completions.create(**kwargs)
+    return completion.choices[0].message.content or ""

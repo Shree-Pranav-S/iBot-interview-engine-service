@@ -4,12 +4,11 @@ WebSocket message contract for interview sessions.
 Client → Server (JSON text frames):
     - session_start  : begin a new interview session
     - session_resume : explicitly request session reconnection
-    - text_message   : typed text input from the candidate
     - stop           : candidate ends the session
     - ping           : keep-alive
 
 Client → Server (binary frames):
-    - raw PCM/opus audio chunk
+    - raw 16 kHz mono linear16 PCM audio chunk
 
 Server → Client (JSON text frames):
     - connection_ack      : handshake confirmed, session id echoed

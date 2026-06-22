@@ -2,9 +2,7 @@ import json
 import logging
 import uuid
 
-from groq import AsyncGroq
-
-from src.config.settings import settings
+from src.core.services.llm_service import evaluate
 from src.data.repositories.interview_repository import (
     get_interview_data_for_evaluation,
     save_holistic_evaluation,
@@ -74,71 +72,62 @@ Ensure your evaluation is entirely unbiased, based heavily on the specific signa
 
 async def run_holistic_evaluation(candidate_assessment_id: str) -> None:
     """
-    Fetch interview data, generate a holistic evaluation via Groq,
-    and persist the results to the database.
+    Runs the final holistic evaluation based on transcript and turn-by-turn evaluations.
     """
     try:
-        ca_id = uuid.UUID(candidate_assessment_id)
-        data = await get_interview_data_for_evaluation(ca_id)
-        if not data or not data["session"]:
-            logger.error(
-                f"Cannot run holistic eval: No data found for {candidate_assessment_id}"
-            )
-            return
+        ca_uuid = uuid.UUID(candidate_assessment_id)
+    except ValueError:
+        logger.error(f"Invalid UUID for evaluation: {candidate_assessment_id}")
+        return
 
-        session = data["session"]
-        turns = data["turns"]
-        evals = data["evaluations"]
+    data = await get_interview_data_for_evaluation(ca_uuid)
+    if not data or not data["session"]:
+        logger.warning(f"No interview data found for {candidate_assessment_id}")
+        return
 
-        if not turns:
-            logger.warning(
-                f"No transcript turns for {candidate_assessment_id}. Skipping eval."
-            )
-            return
+    session = data["session"]
+    turns = data["turns"]
+    evals = data["evaluations"]
 
-        # Format input for LLM
-        transcript_text = "\n".join(
-            f"Turn {t.turn_number} [{t.speaker.upper()} - {t.section}]: {t.text}"
-            for t in turns
-        )
+    if not turns:
+        logger.warning(f"No transcript turns found for {candidate_assessment_id}")
+        return
 
-        evals_text = "\n".join(
-            f"Turn {e.turn_number} [Skill: {e.skill}]: Score={e.score}/10, Quality={e.quality}\n"
-            f"Feedback: {e.one_line_feedback}\n"
-            f"Signals Present: {e.signals_present}, Missing: {e.signals_missing}"
-            for e in evals
-        )
+    # Compile the transcript for the LLM
+    transcript_text = ""
+    for turn in turns:
+        speaker = "Interviewer" if turn.is_interviewer else "Candidate"
+        transcript_text += f"[{speaker} Turn {turn.turn_number} - Section: {turn.section_name}]: {turn.content}\n"
 
-        user_prompt = f"""
-Please generate the comprehensive JSON evaluation for the following interview.
+    # Compile the turn-by-turn evaluations
+    evals_text = ""
+    for ev in evals:
+        evals_text += f"[Turn {ev.turn_number} Eval]: Score {ev.score}/10, Required signals hit: {ev.signals_demonstrated}. Missing: {ev.signals_missing}. Feedback: {ev.feedback_for_candidate}\n"
 
-=== TRANSCRIPT ===
-{transcript_text}
+    violations_text = ""
+    if session.violations:
+        violations_text = f"Violations: {json.dumps(session.violations, indent=2)}\n"
 
-=== PER-TURN EVALUATIONS ===
-{evals_text}
-"""
+    user_message = (
+        f"Transcript:\n{transcript_text}\n"
+        f"Turn-by-turn evaluations:\n{evals_text}\n"
+        f"{violations_text}"
+    )
 
-        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        completion = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": _HOLISTIC_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-        )
+    messages = [
+        {"role": "system", "content": _HOLISTIC_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
 
-        reply_str = completion.choices[0].message.content or "{}"
-        eval_json = json.loads(reply_str)
-
-        # Merge violation summary if any
-        eval_json["violation_summary"] = None
-
-        await save_holistic_evaluation(ca_id, session.id, eval_json)
-
+    try:
+        response_json = await evaluate(messages)
+        eval_data = json.loads(response_json)
     except Exception:
         logger.exception(
-            f"Failed to generate holistic evaluation for {candidate_assessment_id}"
+            f"Failed to generate or parse holistic evaluation for {ca_uuid}"
         )
+        return
+
+    # Save to database
+    await save_holistic_evaluation(ca_uuid, session.id, eval_data)
+    logger.info(f"Holistic evaluation completed and saved for {ca_uuid}")

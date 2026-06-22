@@ -1,22 +1,28 @@
-"""
-InterviewState — LangGraph state schema for the interview workflow.
-
-This TypedDict carries all context across the graph lifetime. Every field
-is checkpointed to Postgres via AsyncPostgresSaver after each node
-execution, providing full fault tolerance and reconnection support.
-"""
+"""LangGraph state for the live interview workflow."""
 
 from __future__ import annotations
 
-from typing import TypedDict
+import operator
+from typing import Annotated, Literal, TypedDict
+
+SectionName = str
+ResponseClass = Literal[
+    "answer",
+    "clarification",
+    "silence",
+    "irrelevant",
+    "skip",
+    "think_request",
+    "time_up",
+]
 
 
-class SectionState(TypedDict):
-    """Describes a single interview section (e.g. 'Python', 'System Design')."""
-
+class SectionState(TypedDict, total=False):
     name: str
-    skill: str
-    priority_score: int
+    section_name: str
+    skill: str | None
+    priority_score: float | None
+    allocated_mins: float
     time_budget_secs: int
     time_elapsed_secs: int
     questions_asked: int
@@ -24,56 +30,101 @@ class SectionState(TypedDict):
     is_complete: bool
 
 
-class InterviewState(TypedDict, total=False):
-    """
-    Full graph state for a single candidate interview session.
-
-    Fields marked total=False so LangGraph can do partial updates
-    (each node returns only the delta it wants to merge).
-    """
-
-    # ── Static context (loaded once at init) ──────────────────────────────────
-    candidate_assessment_id: str
-    interview_plan: dict  # sections, time allocations, order
-    jd_analysis: dict  # skill priorities, behavioural signals
-    resume_context: dict  # parsed resume from LlamaParse
-
-    # ── Section tracking ──────────────────────────────────────────────────────
-    sections: list[SectionState]  # ordered list of section objects
-    current_section_index: int
-    current_section_time_remaining_secs: int
-
-    # ── Turn tracking ─────────────────────────────────────────────────────────
+class QuestionScore(TypedDict, total=False):
+    question: str
+    section: SectionName
+    skill: str | None
+    concept: str | None
+    difficulty: str
+    quality: str
+    raw_score: float
+    reasoning: str
+    signals_demonstrated: list[str]
+    signals_missing: list[str]
     turn_number: int
-    current_question_text: str
-    current_question_difficulty: str  # easy|medium|hard
-    consecutive_strong: int  # for escalation logic
-    consecutive_weak: int  # for recalibration logic
-    used_concepts: list[str]  # anti-repetition injection
-    irrelevant_strike_count: int  # 0,1,2 → 3 = terminate
+    nudge_given: bool
 
-    # ── Silence sub-state ─────────────────────────────────────────────────────
-    silence_attempt: int  # 0 = first nudge, 1 = think offer, 2 = zero
-    think_timer_active: bool
 
-    # ── Per-turn answer data ──────────────────────────────────────────────────
-    last_transcript: str
-    last_response_classification: str  # answer|clarification|silence|irrelevant
-    last_evaluation: dict | None
+class Violation(TypedDict, total=False):
+    turn_number: int
+    violation_type: Literal[
+        "irrelevant",
+        "resume_mismatch",
+        "yoe_mismatch",
+        "terminated",
+        "silence",
+    ]
+    candidate_transcript: str
+    timestamp: float
 
-    # ── Accumulated turn records ──────────────────────────────────────────────
-    transcript_turns: list[dict]
-    answer_evaluations: list[dict]
 
-    # ── Bot output (read by WebSocket layer) ──────────────────────────────────
-    bot_reply_text: str  # latest bot utterance for TTS delivery
-    bot_reply_type: str  # opening|question|clarification|nudge|transition|closing
+class InterviewState(TypedDict, total=False):
+    # Static interview context
+    candidate_assessment_id: str
+    role_name: str
+    company_name: str
+    interview_plan: dict
+    resume_parsed: dict
+    resume_context: dict
 
-    # ── Session control ───────────────────────────────────────────────────────
-    session_status: str  # in_progress|paused|completed|deactivated|terminated
-    timer_started_at: str  # ISO timestamp
+    # Section and timer tracking
+    sections: list[SectionState]
+    current_section_index: int
+    current_section_name: SectionName
+    current_section_time_remaining_secs: int
+    section_started_at: float
+    section_allocated_secs: float
+    total_interview_allocated_secs: int
+    timer_started_at: str
+    interview_started_at: float
     total_elapsed_secs: int
     total_pause_secs: int
     paused_at: str | None
     grace_period_expires_at: str | None
     auto_submit_triggered: bool
+
+    # Question and turn tracking
+    turn_number: int
+    current_question: str
+    current_question_text: str
+    current_question_difficulty: str
+    current_question_concept: str
+    last_bot_text: str
+    last_transcript: str
+    last_response_classification: ResponseClass | None
+    used_concepts: list[str]
+    concepts_covered_in_section: list[str]
+    questions_asked_in_section: int
+    irrelevant_count: int
+    irrelevant_strike_count: int
+    current_difficulty_level: int
+    next_question_mode: str
+    last_question_was_weak_retry: bool
+
+    # Per-turn candidate data
+    candidate_raw_text: str
+    candidate_stt_confidence: float | None
+    response_class: ResponseClass | None
+
+    # Silence handling
+    silence_attempt: int
+
+    # Accumulated records
+    transcript: Annotated[list[dict], operator.add]
+    question_scores: Annotated[list[QuestionScore], operator.add]
+    answer_evaluations: Annotated[list[dict], operator.add]
+    violations: Annotated[list[Violation], operator.add]
+    last_evaluation: dict | None
+
+    # Bot output consumed by the WebSocket layer
+    bot_reply_text: str
+    bot_reply_type: str
+
+    # Session control
+    session_id: str
+    session_status: str
+    should_close: bool
+    closing_done: bool
+    holistic_evaluation_done: bool
+    next_node: str | None
+    resumed: bool

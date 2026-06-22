@@ -84,7 +84,7 @@ class TranscriptTurn(Base):
     # Lets the recruiter understand the context behind each score.
     difficulty_at_time: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Deepgram Nova-3 transcription confidence score — null for bot turns
+    # Deepgram Flux transcription confidence score — null for bot turns
     stt_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Concepts addressed in this turn, merged into LangGraph
