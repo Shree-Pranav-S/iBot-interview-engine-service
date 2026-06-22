@@ -2,19 +2,7 @@
 
 from __future__ import annotations
 
-from langgraph.graph import END
-
 from src.control.agents.state import InterviewState
-
-
-def route_from_start(state: InterviewState) -> str:
-    if not state.get("session_id"):
-        return "session_init"
-    if state.get("should_close"):
-        return "closing"
-    if (state.get("candidate_raw_text") or "").strip():
-        return "classify_response"
-    return END
 
 
 def route_after_session_init(state: InterviewState) -> str:

@@ -72,8 +72,10 @@ async def handle_clarification(state: InterviewState) -> dict:
         "bot_reply_type": "clarification",
         "turn_number": turn_number,
         "candidate_raw_text": "",
+        "candidate_stt_confidence": None,
         "response_class": None,
         "transcript": [turn],
-        "silence_state": {},
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
         "next_node": "await_response",
     }

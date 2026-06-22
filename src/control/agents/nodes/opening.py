@@ -54,6 +54,9 @@ async def opening(state: InterviewState) -> dict:
         "sections": sections,
         "candidate_raw_text": "",
         "response_class": None,
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
+        "skip_requested": False,
         "transcript": [
             {
                 "turn_number": turn_number,

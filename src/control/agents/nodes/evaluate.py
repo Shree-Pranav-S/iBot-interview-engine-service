@@ -176,7 +176,6 @@ async def evaluate_answer(state: InterviewState) -> dict:
     return {
         "last_evaluation": eval_result,
         "question_scores": [q_score],
-        "answer_evaluations": [eval_result],
         "violations": violations,
         "current_difficulty_level": next_level,
         "next_question_mode": next_question_mode,
@@ -184,6 +183,8 @@ async def evaluate_answer(state: InterviewState) -> dict:
         "candidate_raw_text": "",
         "candidate_stt_confidence": None,
         "response_class": None,
-        "silence_state": {},
-        "next_node": "persist_turn",
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
+        "skip_requested": False,
+        "next_node": "generate_question",
     }

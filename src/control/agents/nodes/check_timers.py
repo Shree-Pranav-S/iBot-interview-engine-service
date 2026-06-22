@@ -12,7 +12,7 @@ from src.control.time_manager import (
 
 async def check_timers(state: InterviewState) -> dict:
     elapsed = compute_elapsed(state)
-    total_secs = total_allocated_secs(state)
+    total_allocated_secs(state)
     section_remaining = int(compute_section_time_remaining(state))
     patch: dict = {
         "total_elapsed_secs": elapsed,
@@ -20,11 +20,8 @@ async def check_timers(state: InterviewState) -> dict:
     }
 
     response_class = state.get("response_class")
-    is_time_over = total_secs > 0 and elapsed >= total_secs
 
-    if response_class == "time_up" or (
-        is_time_over and response_class not in ("answer", "clarification")
-    ):
+    if response_class == "time_up":
         patch.update(
             {
                 "auto_submit_triggered": True,

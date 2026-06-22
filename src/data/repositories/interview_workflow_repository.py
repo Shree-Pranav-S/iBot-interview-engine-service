@@ -160,6 +160,30 @@ async def mark_candidate_finished(candidate_assessment_id: str) -> None:
     )
 
 
+async def mark_evaluation_generated(candidate_assessment_id: str) -> None:
+    params = {"candidate_assessment_id": _uuid(candidate_assessment_id)}
+    await execute(
+        """
+        UPDATE candidate_assessments
+        SET status = 'EVALUATED',
+            interview_ended_at = COALESCE(interview_ended_at, NOW()),
+            updated_at = NOW()
+        WHERE id = :candidate_assessment_id
+        """,
+        params,
+    )
+    await execute(
+        """
+        UPDATE interview_sessions
+        SET status = 'EVALUATED',
+            last_updated_at = NOW()
+        WHERE candidate_assessment_id = :candidate_assessment_id
+          AND status IN ('COMPLETED', 'EVALUATED')
+        """,
+        params,
+    )
+
+
 async def mark_session_in_progress(candidate_assessment_id: str) -> None:
     session = await get_existing_session(candidate_assessment_id)
     add_pause = 0

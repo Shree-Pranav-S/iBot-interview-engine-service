@@ -144,7 +144,9 @@ async def session_init(state: InterviewState) -> dict:
                 if item.get("violation_type") == "irrelevant"
             ]
         ),
-        "silence_state": {},
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
+        "skip_requested": False,
         "current_difficulty_level": 1,
         "next_question_mode": "normal",
         "last_question_was_weak_retry": False,
@@ -155,7 +157,6 @@ async def session_init(state: InterviewState) -> dict:
         "resumed": resumed,
         "violations": existing_violations or [],
         "question_scores": [],
-        "answer_evaluations": [],
     }
 
     if resumed and current_question:

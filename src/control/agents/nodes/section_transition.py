@@ -111,7 +111,9 @@ async def section_transition(state: InterviewState) -> dict:
         "bot_reply_type": "transition",
         "candidate_raw_text": "",
         "response_class": None,
-        "silence_state": {},
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
+        "skip_requested": False,
         "transcript": [turn],
         "next_node": "generate_question",
     }

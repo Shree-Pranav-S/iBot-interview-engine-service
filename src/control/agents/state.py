@@ -106,13 +106,14 @@ class InterviewState(TypedDict, total=False):
     candidate_stt_confidence: float | None
     response_class: ResponseClass | None
 
-    # Silence handling
-    silence_attempt: int
+    # Silence and skip handling
+    awaiting_think_decision: bool
+    think_timer_active: bool
+    skip_requested: bool
 
     # Accumulated records
     transcript: Annotated[list[dict], operator.add]
     question_scores: Annotated[list[QuestionScore], operator.add]
-    answer_evaluations: Annotated[list[dict], operator.add]
     violations: Annotated[list[Violation], operator.add]
     last_evaluation: dict | None
 

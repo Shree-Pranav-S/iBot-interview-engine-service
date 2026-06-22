@@ -5,11 +5,9 @@ Core session state table for the interview-service.
 Created when the candidate clicks Start Interview.
 Updated at key lifecycle moments by the application layer.
 
-LangGraph's native AsyncPostgresSaver manages its own checkpoint tables
-(checkpoints, checkpoint_blobs, checkpoint_writes) independently.
-Session recovery uses:
-    graph.ainvoke(None, config={"configurable": {"thread_id": candidate_assessment_id}})
-which loads the LangGraph checkpoint automatically.
+The application persists the durable interview record here: transcript,
+violations, status, and timing fields. The live LangGraph interrupt checkpoint
+is held by the compiled graph checkpointer and keyed by candidate_assessment_id.
 
 IMPORTANT: candidate_assessment_id is the primary cross-service reference key
 that joins back to all core-api tables.
