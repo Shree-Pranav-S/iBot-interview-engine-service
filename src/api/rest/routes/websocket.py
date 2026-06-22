@@ -152,8 +152,6 @@ async def interview_websocket(websocket: WebSocket) -> None:
 
     processing_lock = asyncio.Lock()
 
-    # bot_speaking_event: SET = bot is silent (candidate's turn)
-    #                     CLEARED = bot is speaking (candidate should wait)
     bot_speaking_event = asyncio.Event()
     bot_speaking_event.set()
 
@@ -399,7 +397,7 @@ async def interview_websocket(websocket: WebSocket) -> None:
             # ── Minimum commit delay (seconds) ────────────────────────
             # All candidate turns wait at least this long after the last
             # final STT segment before being committed to the graph.
-            COMMIT_DELAY_SECS = 1.5
+            COMMIT_DELAY_SECS = 1.0
 
             async def wait_and_trigger(delay: float = COMMIT_DELAY_SECS) -> None:
                 nonlocal latest_confidence

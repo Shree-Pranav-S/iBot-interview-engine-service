@@ -279,7 +279,9 @@ async def generate_question(state: InterviewState) -> dict:
         "response_class": None,
         "next_question_mode": "normal",
         "last_question_was_weak_retry": retry,
-        "silence_state": {},
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
+        "skip_requested": False,
         "transcript": [turn],
         "next_node": "await_response",
     }

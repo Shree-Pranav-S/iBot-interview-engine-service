@@ -65,7 +65,8 @@ def _zero_score(
 
 def _reset_silence() -> dict:
     return {
-        "silence_state": {},
+        "awaiting_think_decision": False,
+        "think_timer_active": False,
     }
 
 
@@ -87,8 +88,10 @@ async def handle_silence(state: InterviewState) -> dict:
             "turn_number": turn_number,
             "transcript": [turn],
             "candidate_raw_text": "",
+            "candidate_stt_confidence": None,
             "response_class": None,
-            "silence_state": {},
+            "awaiting_think_decision": False,
+            "think_timer_active": True,
             "next_node": "await_response",
         }
 
@@ -106,10 +109,10 @@ async def handle_silence(state: InterviewState) -> dict:
             "turn_number": turn_number,
             "transcript": [turn],
             "question_scores": [q_score],
-            "answer_evaluations": [eval_result],
             "last_evaluation": eval_result,
             "violations": [violation],
             "candidate_raw_text": "",
+            "candidate_stt_confidence": None,
             "response_class": None,
             "next_question_mode": "normal",
             "next_node": "generate_question",
@@ -131,10 +134,10 @@ async def handle_silence(state: InterviewState) -> dict:
             "turn_number": turn_number,
             "transcript": [turn],
             "question_scores": [q_score],
-            "answer_evaluations": [eval_result],
             "last_evaluation": eval_result,
             "violations": [violation],
             "candidate_raw_text": "",
+            "candidate_stt_confidence": None,
             "response_class": None,
             "next_question_mode": "normal",
             "next_node": "generate_question",
@@ -158,10 +161,10 @@ async def handle_silence(state: InterviewState) -> dict:
             "turn_number": turn_number,
             "transcript": [turn],
             "question_scores": [q_score],
-            "answer_evaluations": [eval_result],
             "last_evaluation": eval_result,
             "violations": [violation],
             "candidate_raw_text": "",
+            "candidate_stt_confidence": None,
             "response_class": None,
             "next_node": "generate_question",
         }
@@ -177,7 +180,9 @@ async def handle_silence(state: InterviewState) -> dict:
         "turn_number": turn_number,
         "transcript": [turn],
         "candidate_raw_text": "",
+        "candidate_stt_confidence": None,
         "response_class": None,
-        "silence_state": {},
+        "awaiting_think_decision": True,
+        "think_timer_active": False,
         "next_node": "await_response",
     }

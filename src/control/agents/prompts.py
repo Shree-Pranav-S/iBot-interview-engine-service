@@ -129,6 +129,8 @@ Evaluate this answer. Return ONLY valid JSON:
   "signals_missing": ["signal1"],
   "is_substantial": true|false,
   "key_concept_demonstrated": "concept or empty string",
+  "resume_contradiction": true|false,
+  "yoe_contradiction": true|false,
   "one_line_feedback": "brief internal note about answer quality",
   "reasoning": "brief reason for the score"
 }}
@@ -168,6 +170,10 @@ def build_generate_question_prompt(state: InterviewState) -> str:
             'Return JSON: {"question_text": "...", "concept_tag": "self_introduction", "difficulty": "easy"}'
         )
 
+    contradiction_rule = ""
+    if last_eval.get("resume_contradiction"):
+        contradiction_rule = "- VERY IMPORTANT: The candidate just claimed they have no experience in this skill, but it is listed on their resume. You MUST briefly acknowledge this contradiction (e.g., 'It is surprising that you say you have no experience considering your background...') before asking the next question.\n"
+
     return f"""
 You are a senior {state.get("role_name", "role")} interviewer.
 
@@ -191,7 +197,7 @@ Weak-retry mode: {retry_mode}
 Weak-retry concept: {retry_concept}
 
 Generate ONE question. Rules:
-- If time_remaining < 60 seconds, ask a quick wrap-up question, not a deep dive.
+{contradiction_rule}- If time_remaining < 60 seconds, ask a quick wrap-up question, not a deep dive.
 - If weak-retry mode is true, ask one easier question on the weak-retry concept, then do not keep repeating it.
 - If signals_missing is non-empty and weak-retry mode is false, probe one missing signal without repeating a used concept.
 - Match difficulty: easy=definition/example, medium=design/tradeoff, hard=edge cases/failure modes.

@@ -111,7 +111,6 @@ async def closing(state: InterviewState) -> dict:
     final_state["transcript"] = [*(state.get("transcript") or []), *closing_turns]
     final_state["violations"] = state.get("violations") or []
     final_state["question_scores"] = state.get("question_scores") or []
-    final_state["answer_evaluations"] = state.get("answer_evaluations") or []
     await db.persist_session_state(final_state)
     try:
         await db.mark_candidate_finished(state["candidate_assessment_id"])
