@@ -4,8 +4,9 @@ LLM Service — Centralised Groq client for all interview graph nodes.
 Provides a singleton AsyncGroq client (reused across the entire application
 lifecycle) and typed helper methods for each LLM task:
   - classify()     → fast 8B model, low tokens
-  - evaluate()     → 70B model, structured JSON
-  - generate()     → 70B model, question generation
+  - live_evaluate() → fast 8B model, live answer strength JSON
+  - evaluate()     → 70B model, final holistic JSON
+  - generate()     → fast 8B model, question generation
   - lightweight()  → fast 8B model, short free-form completions
 
 Reusing a single client avoids per-call HTTP connection-pool creation,
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _client: AsyncGroq | None = None
 _fallback_client: AsyncGroq | None = None
+_eval_client: AsyncGroq | None = None
+_eval_fallback_client: AsyncGroq | None = None
 
 
 def _get_client(use_fallback: bool = False) -> AsyncGroq:
@@ -49,6 +52,25 @@ def _get_client(use_fallback: bool = False) -> AsyncGroq:
 
 
 # ── Typed helpers ─────────────────────────────────────────────────────────────
+
+
+def _get_eval_client(use_fallback: bool = False) -> AsyncGroq:
+    """Return a Groq client with a longer timeout for final evaluations."""
+    global _eval_client, _eval_fallback_client
+    if use_fallback:
+        if _eval_fallback_client is None:
+            _eval_fallback_client = AsyncGroq(
+                api_key=settings.FALLBACK_GROQ_API_KEY,
+                timeout=settings.GROQ_EVAL_TIMEOUT_SECS,
+            )
+        return _eval_fallback_client
+
+    if _eval_client is None:
+        _eval_client = AsyncGroq(
+            api_key=settings.GROQ_API_KEY,
+            timeout=settings.GROQ_EVAL_TIMEOUT_SECS,
+        )
+    return _eval_client
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
@@ -81,7 +103,7 @@ async def classify(messages: list[dict]) -> str:
 async def evaluate(messages: list[dict]) -> str:
     """Call the evaluation model (70B) with JSON output. Returns raw JSON string."""
     try:
-        client = _get_client(use_fallback=False)
+        client = _get_eval_client(use_fallback=False)
         completion = await client.chat.completions.create(
             model=settings.GROQ_EVAL_MODEL,
             messages=messages,  # type: ignore[arg-type]
@@ -94,7 +116,7 @@ async def evaluate(messages: list[dict]) -> str:
             "Groq evaluate failed with primary API key: %s. Retrying with fallback...",
             e,
         )
-        client = _get_client(use_fallback=True)
+        client = _get_eval_client(use_fallback=True)
         completion = await client.chat.completions.create(
             model=settings.GROQ_EVAL_MODEL,
             messages=messages,  # type: ignore[arg-type]
@@ -106,8 +128,36 @@ async def evaluate(messages: list[dict]) -> str:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+async def live_evaluate(messages: list[dict]) -> str:
+    """Call the fast live technical evaluation model with JSON output."""
+    try:
+        client = _get_client(use_fallback=False)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_LIVE_EVAL_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_LIVE_EVAL_MAX_TOKENS,
+            temperature=settings.GROQ_LIVE_EVAL_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        logger.warning(
+            "Groq live_evaluate failed with primary API key: %s. Retrying with fallback...",
+            e,
+        )
+        client = _get_client(use_fallback=True)
+        completion = await client.chat.completions.create(
+            model=settings.GROQ_LIVE_EVAL_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=settings.GROQ_LIVE_EVAL_MAX_TOKENS,
+            temperature=settings.GROQ_LIVE_EVAL_TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+    return completion.choices[0].message.content or ""
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 async def generate(messages: list[dict]) -> str:
-    """Call the main generation model (70B) with JSON output. Returns raw JSON string."""
+    """Call the question generation model with JSON output. Returns raw JSON string."""
     try:
         client = _get_client(use_fallback=False)
         completion = await client.chat.completions.create(

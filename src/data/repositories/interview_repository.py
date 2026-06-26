@@ -1,7 +1,6 @@
 import json
 import logging
 import uuid
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -11,45 +10,78 @@ from src.data.clients.postgres_client import get_session_factory
 logger = logging.getLogger(__name__)
 
 
-def _parse_datetime(dt_str: str | None) -> datetime | None:
-    if not dt_str:
-        return None
-    try:
-        return datetime.fromisoformat(dt_str)
-    except Exception:
-        return None
-
-
-async def sync_interview_state(state: dict) -> None:
-    """
-    Synchronizes the LangGraph InterviewState dictionary with the Postgres
-    relational schema. Kept as a no-op because transcript and violations are
-    persisted directly on interview_sessions in the current schema.
-    """
-    logger.debug("sync_interview_state skipped (no-op)")
-
-
 async def get_interview_data_for_evaluation(
     candidate_assessment_id: uuid.UUID,
 ) -> dict[str, Any] | None:
-    """Fetch the durable session JSON used for holistic assessment."""
+    """Fetch durable session JSON plus JD context used for holistic assessment."""
     try:
         SessionLocal = await get_session_factory()
         async with SessionLocal() as db_session:
             result = await db_session.execute(
                 text(
                     """
-                    SELECT id, candidate_assessment_id, status, transcript, violations
-                    FROM interview_sessions
-                    WHERE candidate_assessment_id = :candidate_assessment_id
+                    SELECT
+                        s.id,
+                        s.candidate_assessment_id,
+                        s.status,
+                        s.transcript,
+                        s.violations,
+                        s.total_elapsed_secs,
+                        s.total_pause_secs,
+                        ca.assessment_id,
+                        ca.resume_parsed,
+                        ca.status AS candidate_assessment_status,
+                        c.full_name AS candidate_name,
+                        c.email AS candidate_email,
+                        a.title AS assessment_title,
+                        a.role_name,
+                        a.jd_text,
+                        a.jd_analysis,
+                        a.focus_areas,
+                        a.interview_plan,
+                        a.interview_duration_mins,
+                        COALESCE(r.company_name, '') AS company_name
+                    FROM interview_sessions s
+                    JOIN candidate_assessments ca
+                        ON ca.id = s.candidate_assessment_id
+                    JOIN candidates c ON c.id = ca.candidate_id
+                    JOIN assessments a ON a.id = ca.assessment_id
+                    LEFT JOIN recruiters r ON r.id = a.recruiter_id
+                    WHERE s.candidate_assessment_id = :candidate_assessment_id
                     """
                 ),
                 {"candidate_assessment_id": candidate_assessment_id},
             )
-            session = result.mappings().first()
-            if not session:
+            row = result.mappings().first()
+            if not row:
                 return None
-            return {"session": dict(session), "turns": [], "evaluations": []}
+
+            data = dict(row)
+            session = {
+                "id": data["id"],
+                "candidate_assessment_id": data["candidate_assessment_id"],
+                "status": data["status"],
+                "transcript": data.get("transcript") or [],
+                "violations": data.get("violations") or [],
+                "total_elapsed_secs": data.get("total_elapsed_secs") or 0,
+                "total_pause_secs": data.get("total_pause_secs") or 0,
+            }
+            context = {
+                "assessment_id": data.get("assessment_id"),
+                "candidate_name": data.get("candidate_name"),
+                "candidate_email": data.get("candidate_email"),
+                "assessment_title": data.get("assessment_title"),
+                "role_name": data.get("role_name"),
+                "company_name": data.get("company_name"),
+                "jd_text": data.get("jd_text"),
+                "jd_analysis": data.get("jd_analysis"),
+                "focus_areas": data.get("focus_areas"),
+                "interview_plan": data.get("interview_plan"),
+                "interview_duration_mins": data.get("interview_duration_mins"),
+                "resume_parsed": data.get("resume_parsed"),
+                "candidate_assessment_status": data.get("candidate_assessment_status"),
+            }
+            return {"session": session, "context": context}
     except Exception:
         logger.exception(
             "Failed to fetch interview data for %s", candidate_assessment_id
@@ -211,30 +243,70 @@ async def save_holistic_evaluation(
                     ),
                 },
             )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE interview_sessions
+                    SET status = 'EVALUATED',
+                        last_updated_at = NOW()
+                    WHERE id = :session_id
+                    """
+                ),
+                {"session_id": session_id},
+            )
+            await db_session.execute(
+                text(
+                    """
+                    UPDATE candidate_assessments
+                    SET status = 'EVALUATED',
+                        interview_ended_at = COALESCE(interview_ended_at, NOW()),
+                        updated_at = NOW()
+                    WHERE id = :candidate_assessment_id
+                    """
+                ),
+                {"candidate_assessment_id": candidate_assessment_id},
+            )
+            await db_session.execute(
+                text(
+                    """
+                    WITH assessment_scope AS (
+                        SELECT assessment_id
+                        FROM candidate_assessments
+                        WHERE id = :candidate_assessment_id
+                    ),
+                    ranked AS (
+                        SELECT
+                            ie.id,
+                            RANK() OVER (
+                                ORDER BY ie.overall_score DESC, ie.generated_at ASC
+                            ) AS rank_position,
+                            COUNT(*) OVER () AS total_count
+                        FROM interview_evaluations ie
+                        JOIN candidate_assessments ca
+                            ON ca.id = ie.candidate_assessment_id
+                        WHERE ca.assessment_id = (
+                            SELECT assessment_id FROM assessment_scope
+                        )
+                    )
+                    UPDATE interview_evaluations ie
+                    SET rank_in_assessment = ranked.rank_position,
+                        total_candidates_evaluated = ranked.total_count,
+                        percentile_in_assessment = CASE
+                            WHEN ranked.total_count <= 1 THEN 100
+                            ELSE ROUND(
+                                ((ranked.total_count - ranked.rank_position)::numeric
+                                / (ranked.total_count - 1)) * 100
+                            )::integer
+                        END
+                    FROM ranked
+                    WHERE ie.id = ranked.id
+                    """
+                ),
+                {"candidate_assessment_id": candidate_assessment_id},
+            )
             await db_session.commit()
     except Exception:
         logger.exception(
             "Failed to save holistic evaluation for %s", candidate_assessment_id
         )
         raise
-
-
-async def get_assessment_context_by_ca_id(ca_uuid: uuid.UUID) -> tuple | None:
-    """Fetches resume, JD analysis, interview plan, and role name for an assessment."""
-    try:
-        SessionLocal = await get_session_factory()
-        async with SessionLocal() as db_session:
-            query = text(
-                "SELECT ca.resume_parsed, a.jd_analysis, a.interview_plan, a.role_name, "
-                "COALESCE(r.company_name, '') AS company_name "
-                "FROM candidate_assessments ca "
-                "JOIN assessments a ON ca.assessment_id = a.id "
-                "LEFT JOIN recruiters r ON a.recruiter_id = r.id "
-                "WHERE ca.id = :ca_id"
-            )
-            result = await db_session.execute(query, {"ca_id": ca_uuid})
-            row = result.fetchone()
-            return tuple(row) if row else None
-    except Exception:
-        logger.exception("Failed to fetch assessment context for CA ID %s", ca_uuid)
-        return None

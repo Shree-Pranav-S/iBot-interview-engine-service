@@ -1,119 +1,150 @@
-"""Section transition node."""
+"""Static section transition node for the interview graph."""
 
 from __future__ import annotations
 
-import logging
-import time
+from typing import Any
 
-from src.config.settings import settings
-from src.control.agents.llm import groq_complete
-from src.control.agents.prompts import trim_to_2_sentences
+from src.control.agents.nodes.context_utils import _next_bot_turn_number
 from src.control.agents.state import InterviewState
+from src.utils.interview_graph import (
+    clean_section_name,
+    deterministic_turn_id,
+    utc_now_iso,
+)
 
-logger = logging.getLogger(__name__)
+URGENT_BEHAVIOURAL_TRANSITIONS = (
+    "We need to move on to the behaviour and cultural section as we are short on time.",
+    "We are short on time, so we need to move into the behaviour and cultural "
+    "section now.",
+    "I am going to move us to the behaviour and cultural section now because "
+    "time is almost up.",
+    "Since we have very little time left, we need to shift to the behaviour "
+    "and cultural section.",
+    "We need to cover the behaviour and cultural section now before the interview ends.",
+    "Time is running short, so I will move us to the behaviour and cultural section now.",
+    "I need to switch us to the behaviour and cultural section now so we can "
+    "still capture that signal.",
+    "We are nearly out of time, so let us move to the behaviour and cultural section.",
+    "I will move us to the behaviour and cultural section now because we only "
+    "have a little time left.",
+    "Before we run out of time, we need to cover the behaviour and cultural section.",
+)
+OVERRUN_TRANSITIONS = (
+    "Thanks for that. We need to move on to {display} now because we are short "
+    "on time.",
+    "Thanks. I need to move us to {display} now so we can stay within time.",
+    "I appreciate that answer. We are short on time, so let us move to {display}.",
+    "Thanks for sharing that. I am going to shift us to {display} now.",
+    "Got it. We need to continue with {display} now because of the remaining time.",
+    "Thank you. I will move us to {display} now so we can cover the next area.",
+    "Thanks. Time is tight, so we need to go to {display} now.",
+    "I have captured that. Let us move to {display} now due to time.",
+    "Thanks for the response. We need to switch to {display} now.",
+    "Understood. We will move to {display} now to keep the interview on track.",
+)
+STANDARD_TRANSITIONS = (
+    "Thanks for that. Let's move to {display}.",
+    "Thank you. We will move to {display} now.",
+    "Got it. Let's continue with {display}.",
+    "Thanks. I will move us into {display}.",
+    "I have captured that. Let's go to {display}.",
+    "Thank you for the answer. The next section is {display}.",
+    "Great, let's shift to {display}.",
+    "Understood. We will continue with {display}.",
+    "Thanks for sharing that. Let's move ahead to {display}.",
+    "All right, let's continue into {display}.",
+)
 
-_TRANSITION_SYSTEM = """\
-You are a senior interviewer transitioning between interview sections. Generate a natural spoken transition.
-Keep it to 1-2 sentences. Acknowledge the section just completed and introduce the next section warmly.
-No markdown, no bullets, no evaluation.
-"""
+
+def _runtime_section(state: InterviewState, index: int) -> dict[str, Any]:
+    sections = state.get("runtime_sections") or []
+    if 0 <= index < len(sections):
+        item = sections[index]
+        if isinstance(item, dict):
+            return item
+    return {}
 
 
-def _fallback(previous: str, next_name: str, next_skill: str | None) -> str:
-    prev = previous.lower()
-    nxt = next_name.lower()
-    if prev == "self_intro":
-        return "Thank you for that introduction. Let's move into the role-specific questions now."
-    if nxt in {"behavioural", "behavioral"}:
-        return "Good, let's shift gears and talk about your work style and past experiences."
-    if nxt == "cultural":
-        return (
-            "Thanks, let's finish with a quick look at team fit and work preferences."
-        )
-    if next_skill:
-        return f"Good, let's move on to {next_skill}."
-    return "Great, let's move on to the next area of the interview."
+def _display_name(state: InterviewState, index: int, section: str) -> str:
+    item = _runtime_section(state, index)
+    return str(item.get("display_name") or section.replace("_", " ").title())
 
 
-async def section_transition(state: InterviewState) -> dict:
-    sections = [dict(section) for section in state.get("sections") or []]
-    current_idx = int(state.get("current_section_index") or 0)
-    now = time.time()
-    if current_idx < len(sections):
-        sections[current_idx]["is_complete"] = True
-        sections[current_idx]["time_elapsed_secs"] = int(
-            now - float(state.get("section_started_at") or now)
-        )
+def _pick(options: tuple[str, ...], state: InterviewState, salt: str) -> str:
+    basis = f"{state.get('current_question_id')}-{state.get('turn_number')}-{salt}"
+    index = sum(ord(char) for char in basis) % len(options)
+    return options[index]
 
-    next_idx = current_idx + 1
-    if next_idx >= len(sections):
+
+def _transition_text(state: InterviewState, display: str) -> str:
+    if state.get("force_behavioural_cultural_due_to_time"):
+        return _pick(URGENT_BEHAVIOURAL_TRANSITIONS, state, "urgent-behavioural")
+    if state.get("force_transition_due_to_overrun"):
+        return _pick(OVERRUN_TRANSITIONS, state, "overrun").format(display=display)
+    return _pick(STANDARD_TRANSITIONS, state, "standard").format(display=display)
+
+
+async def generate_section_transition(state: InterviewState) -> dict[str, Any]:
+    section_order = state.get("section_order") or []
+    current_index = int(state.get("current_section_index") or 0)
+    next_index = state.get("next_section_index")
+    if next_index is None:
+        next_index = current_index + 1
+    next_index = int(next_index)
+
+    if next_index >= len(section_order):
         return {
-            "sections": sections,
-            "current_section_index": next_idx,
+            "next_action": "complete",
             "should_close": True,
-            "session_status": "COMPLETED",
-            "next_node": "closing",
+            "closing_reason": state.get("closing_reason") or "sections_complete",
         }
 
-    previous = str(state.get("current_section_name") or "")
-    next_section = sections[next_idx]
-    next_name = str(
-        next_section.get("section_name") or next_section.get("name") or "general"
-    )
-    next_skill = str(next_section.get("skill") or "") or None
-    try:
-        text = await groq_complete(
-            system=_TRANSITION_SYSTEM,
-            user=f"From section: {previous}\nTo section: {next_name}\nNext skill: {next_skill or 'general'}\nGenerate the transition.",
-            max_tokens=120,
-            temperature=0.7,
-            model=settings.GROQ_CLASSIFY_MODEL,
-        )
-        text = text.strip()
-        if len(text) < 10:
-            raise ValueError("Transition too short")
-    except Exception:
-        logger.exception("Transition generation failed; using fallback")
-        text = _fallback(previous, next_name, next_skill)
-    text = trim_to_2_sentences(text)
+    session_id = str(state["interview_session_id"])
+    turn_number = _next_bot_turn_number(state)
+    next_section = clean_section_name(section_order[next_index])
+    section_data = _runtime_section(state, next_index)
+    display = _display_name(state, next_index, next_section)
+    text = _transition_text(state, display)
 
-    turn_number = int(state.get("turn_number") or 0) + 1
     turn = {
+        "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
         "turn_number": turn_number,
         "speaker": "bot",
+        "tone": "professional",
         "text": text,
-        "tone": "neutral",
-        "section": next_name,
-        "turn_type": "transition",
-        "type": "transition",
-        "from_section": previous,
-        "to_section": next_name,
-        "timestamp": now,
+        "section": next_section,
+        "skill": section_data.get("skill"),
+        "difficulty": state.get("current_difficulty") or "medium",
+        "question_id": None,
+        "timestamp": utc_now_iso(),
+        "metadata": {"message_type": "section_transition"},
     }
     return {
-        "sections": sections,
-        "current_section_index": next_idx,
-        "current_section_name": next_name,
-        "section_started_at": now,
-        "section_allocated_secs": float(next_section.get("time_budget_secs") or 60),  # type: ignore
-        "current_section_time_remaining_secs": int(  # type: ignore
-            next_section.get("time_budget_secs") or 60
+        "previous_section": state.get("current_section"),
+        "current_section": next_section,
+        "current_section_index": next_index,
+        "current_section_name": next_section,
+        "current_skill": section_data.get("skill"),
+        "current_question_id": None,
+        "current_question_text": None,
+        "section_started_at": utc_now_iso(),
+        "current_section_elapsed_secs": 0,
+        "current_section_remaining_secs": int(
+            (state.get("section_budgets") or {}).get(next_section) or 0
         ),
-        "questions_asked_in_section": 0,
-        "concepts_covered_in_section": [],
-        "used_concepts": [],
-        "current_difficulty_level": 1,
-        "next_question_mode": "normal",
-        "last_question_was_weak_retry": False,
-        "turn_number": turn_number,
+        "clarification_count_for_current_question": 0,
+        "silence_count_for_current_question": 0,
+        "non_answer_count_for_current_question": 0,
+        "skip_count_for_current_question": 0,
+        "think_silence_count": 0,
+        "awaiting_think_confirmation": False,
+        "think_extension_active": False,
+        "next_section_index": None,
+        "next_action": "next_question",
+        "pending_bot_turn": turn,
         "last_bot_text": text,
-        "bot_reply_text": text,
-        "bot_reply_type": "transition",
-        "candidate_raw_text": "",
-        "response_class": None,
-        "awaiting_think_decision": False,
-        "think_timer_active": False,
-        "skip_requested": False,
-        "transcript": [turn],
-        "next_node": "generate_question",
+        "bot_reply_type": "section_transition",
+        "should_close": False,
+        "force_transition_due_to_overrun": False,
+        "force_behavioural_cultural_due_to_time": False,
     }

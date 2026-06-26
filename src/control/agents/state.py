@@ -1,131 +1,124 @@
-"""LangGraph state for the live interview workflow."""
+"""LangGraph state for the voice-led interview workflow."""
 
 from __future__ import annotations
 
-import operator
-from typing import Annotated, Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
-SectionName = str
-ResponseClass = Literal[
+SessionStatus = Literal[
+    "INITIALIZING",
+    "IN_PROGRESS",
+    "PAUSED",
+    "COMPLETED",
+    "EVALUATED",
+    "DEACTIVATED",
+    "TERMINATED",
+]
+Difficulty = Literal["easy", "medium", "hard"]
+ResponseType = Literal[
     "answer",
-    "clarification",
+    "clarification_question",
     "silence",
-    "irrelevant",
+    "irrelevant_answer",
+    "non_answer",
+    "technical_issue",
+    "interruption",
+    "disconnect",
     "skip",
     "think_request",
-    "time_up",
+    "timer_expired",
 ]
 
 
-class SectionState(TypedDict, total=False):
-    name: str
-    section_name: str
-    skill: str | None
-    priority_score: float | None
-    allocated_mins: float
-    time_budget_secs: int
-    time_elapsed_secs: int
-    questions_asked: int
-    concepts_covered: list[str]
-    is_complete: bool
-
-
-class QuestionScore(TypedDict, total=False):
-    question: str
-    section: SectionName
-    skill: str | None
-    concept: str | None
-    difficulty: str
-    quality: str
-    raw_score: float
-    reasoning: str
-    signals_demonstrated: list[str]
-    signals_missing: list[str]
-    turn_number: int
-    nudge_given: bool
-
-
-class Violation(TypedDict, total=False):
-    turn_number: int
-    violation_type: Literal[
-        "irrelevant",
-        "resume_mismatch",
-        "yoe_mismatch",
-        "terminated",
-        "silence",
-    ]
-    candidate_transcript: str
-    timestamp: float
-
-
 class InterviewState(TypedDict, total=False):
-    # Static interview context
+    # Identity
     candidate_assessment_id: str
+    interview_session_id: str | None
+    thread_id: str
+
+    # Context
+    candidate_name: str
+    candidate_email: str | None
     role_name: str
     company_name: str
-    interview_plan: dict
-    resume_parsed: dict
-    resume_context: dict
+    assessment_title: str
+    resume_parsed: dict[str, Any]
+    focus_areas: dict[str, Any] | list[dict[str, Any]] | None
+    interview_plan: dict[str, Any]
+    runtime_sections: list[dict[str, Any]]
+    interview_duration_mins: int
 
-    # Section and timer tracking
-    sections: list[SectionState]
-    current_section_index: int
-    current_section_name: SectionName
-    current_section_time_remaining_secs: int
-    section_started_at: float
-    section_allocated_secs: float
-    total_interview_allocated_secs: int
-    timer_started_at: str
-    interview_started_at: float
-    total_elapsed_secs: int
+    # Time
+    total_duration_secs: int
+    started_at: str | None
+    elapsed_secs: int
     total_pause_secs: int
-    paused_at: str | None
-    grace_period_expires_at: str | None
-    auto_submit_triggered: bool
+    section_started_at: str | None
+    current_section_elapsed_secs: int
+    current_section_remaining_secs: int
+    remaining_secs: int
+    soft_total_overrun_secs: int
+    soft_section_overrun_secs: int
+    force_close_due_to_overrun: bool
+    force_transition_due_to_overrun: bool
+    force_behavioural_cultural_due_to_time: bool
+    close_after_behavioural_cultural: bool
+    section_budgets: dict[str, int]
+    section_order: list[str]
 
-    # Question and turn tracking
+    # Current position
+    current_section: str
+    current_section_index: int
+    current_section_name: str
+    current_skill: str | None
+    current_question_id: str | None
+    current_question_text: str | None
+    current_difficulty: Difficulty
     turn_number: int
-    current_question: str
-    current_question_text: str
-    current_question_difficulty: str
-    current_question_concept: str
-    last_bot_text: str
-    last_transcript: str
-    last_response_classification: ResponseClass | None
-    used_concepts: list[str]
-    concepts_covered_in_section: list[str]
-    questions_asked_in_section: int
-    irrelevant_count: int
-    irrelevant_strike_count: int
-    current_difficulty_level: int
-    next_question_mode: str
-    last_question_was_weak_retry: bool
 
-    # Per-turn candidate data
-    candidate_raw_text: str
-    candidate_stt_confidence: float | None
-    response_class: ResponseClass | None
-
-    # Silence and skip handling
-    awaiting_think_decision: bool
-    think_timer_active: bool
-    skip_requested: bool
-
-    # Accumulated records
-    transcript: Annotated[list[dict], operator.add]
-    question_scores: Annotated[list[QuestionScore], operator.add]
-    violations: Annotated[list[Violation], operator.add]
-    last_evaluation: dict | None
-
-    # Bot output consumed by the WebSocket layer
+    # Short-term memory
+    recent_turns: list[dict[str, Any]]
+    last_candidate_event: dict[str, Any] | None
+    last_response_type: ResponseType | None
+    last_response_substantial: bool | None
+    last_response_reason: str | None
+    last_classification: dict[str, Any] | None
+    last_bot_text: str | None
     bot_reply_text: str
     bot_reply_type: str
 
-    # Session control
-    session_id: str
-    session_status: str
+    # Adaptive control
+    asked_questions: list[dict[str, Any]]
+    skill_progress: dict[str, Any]
+    live_evaluations: list[dict[str, Any]]
+    latest_evaluation: dict[str, Any] | None
+    clarification_count_for_current_question: int
+    silence_count_for_current_question: int
+    non_answer_count_for_current_question: int
+    skip_count_for_current_question: int
+    think_silence_count: int
+    awaiting_think_confirmation: bool
+    think_extension_active: bool
+    irrelevant_count_total: int
+
+    # Session reliability
+    session_status: SessionStatus
+    disconnected_at: str | None
+    grace_period_expires_at: str | None
+    reconnect_count: int
+
+    # Routing and node-local durable writes
+    next_action: str | None
+    next_node: str | None
     should_close: bool
     closing_done: bool
-    holistic_evaluation_done: bool
-    next_node: str | None
+    final_evaluation_status: str | None
+    holistic_evaluation_task_id: str | None
     resumed: bool
+    candidate_event: dict[str, Any] | str | None
+    normalized_candidate_event: dict[str, Any] | None
+    pending_bot_turn: dict[str, Any] | None
+    pending_candidate_turn: dict[str, Any] | None
+    violation_to_persist: dict[str, Any] | None
+    next_section_index: int | None
+    previous_section: str | None
+    closing_reason: str | None

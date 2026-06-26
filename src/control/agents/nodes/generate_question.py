@@ -1,287 +1,256 @@
-"""Question generation node."""
+"""Minimal-context interview question generation."""
 
 from __future__ import annotations
 
-import logging
-import time
+from typing import Any
 
-from src.control.agents.llm import groq_complete, parse_json
+from src.control.agents.nodes.context_utils import (
+    NON_TECH_SECTIONS,
+    _next_bot_turn_number,
+    is_behavioural_cultural_section_name,
+)
+from src.control.agents.nodes.llm_helpers import (
+    clean_text,
+    compact_json,
+    generate_json,
+    model_to_dict,
+)
+from src.control.agents.prompts import (
+    BEHAVIOURAL_QUESTION_SYSTEM_PROMPT,
+    QUESTION_GENERATION_SYSTEM_PROMPT,
+)
 from src.control.agents.state import InterviewState
-from src.control.time_manager import (
-    check_interview_complete,
-    check_section_should_advance,
-    compute_section_time_remaining,
-    difficulty_label,
+from src.schemas.prompts import QuestionGenerationResponse
+from src.utils.interview_graph import (
+    clean_section_name,
+    deterministic_turn_id,
+    utc_now_iso,
 )
 
-logger = logging.getLogger(__name__)
-
-QUESTION_SYSTEM = """\
-You are a senior interviewer conducting a live voice interview. Your words will be spoken aloud.
-
-Rules:
-- Sound warm, professional, and natural.
-- Briefly acknowledge the candidate's previous answer before asking the next question.
-- Do not reveal scores or say whether the answer was good or bad.
-- Ask exactly one question.
-- Keep it concise, 1-2 sentences maximum.
-- Avoid markdown, bullets, and numbered lists.
-- Do not repeat concepts already covered unless explicitly told this is an easier retry.
-
-Return ONLY valid JSON:
-{"question_text":"spoken interviewer utterance","concept_tag":"core_concept","difficulty":"easy|medium|hard"}
-"""
+SELF_INTRO_QUESTION = (
+    "To start, could you briefly introduce yourself and highlight the experience "
+    "most relevant to this role?"
+)
 
 
-def _section(state: InterviewState) -> dict:
-    sections = state.get("sections") or []
-    idx = int(state.get("current_section_index") or 0)
-    return sections[idx] if idx < len(sections) else {}  # type: ignore
+def _plan_section(state: InterviewState, section_index: int) -> dict[str, Any]:
+    runtime_sections = state.get("runtime_sections") or []
+    if 0 <= section_index < len(runtime_sections):
+        item = runtime_sections[section_index]
+        if isinstance(item, dict):
+            return item
+    return {}
 
 
-def _history(state: InterviewState) -> str:
-    turns = state.get("transcript") or []
-    recent = turns[-6:]
-    if not recent:
-        return "No conversation yet."
-    lines: list[str] = []
-    for turn in recent:
-        speaker = "INTERVIEWER" if turn.get("speaker") == "bot" else "CANDIDATE"
-        text = str(turn.get("text") or "")
-        if len(text) > 350:
-            text = text[:350] + "..."
-        if text:
-            lines.append(f"{speaker}: {text}")
-    return "\n".join(lines) or "No conversation yet."
+def _count_section_questions(
+    asked_questions: list[dict[str, Any]],
+    section: str,
+) -> int:
+    return sum(
+        1
+        for item in asked_questions
+        if item.get("section") == section and not item.get("is_followup")
+    )
 
 
-def _resume_summary(state: InterviewState) -> str:
-    resume = state.get("resume_context") or state.get("resume_parsed") or {}
-    parts: list[str] = []
-    if resume.get("summary"):
-        parts.append(str(resume["summary"]))
-    if resume.get("experience_years"):
-        parts.append(f"Experience: {resume['experience_years']} years")
-    skills = resume.get("skills") or []
-    if isinstance(skills, list) and skills:
-        parts.append("Skills: " + ", ".join(str(item) for item in skills[:12]))
-    return " | ".join(parts) if parts else "Not available"
+def _previous_questions(
+    state: InterviewState,
+    *,
+    section: str,
+    skill: str | None,
+) -> list[str]:
+    questions: list[str] = []
+    for item in state.get("asked_questions") or []:
+        if not isinstance(item, dict):
+            continue
+        same_skill = skill and str(item.get("skill") or "").lower() == skill.lower()
+        same_section = item.get("section") == section
+        if same_skill or same_section:
+            text = str(item.get("question_text") or "").strip()
+            if text:
+                questions.append(text)
+    return questions[-10:]
 
 
-def _fallback_question(state: InterviewState, section: dict, *, retry: bool) -> dict:
-    name = str(section.get("section_name") or section.get("name") or "general")
-    skill = section.get("skill") or name
-    remaining = compute_section_time_remaining(state)
-    concept = str(state.get("current_question_concept") or skill or name)
-    difficulty = difficulty_label(int(state.get("current_difficulty_level") or 2))
+def _latest_candidate_answer(state: InterviewState) -> str:
+    event = state.get("normalized_candidate_event") or {}
+    text = str(event.get("text") or "").strip()
+    if text:
+        return text
+    for turn in reversed(state.get("recent_turns") or []):
+        if str(turn.get("speaker") or "").lower() == "candidate":
+            return str(turn.get("text") or "").strip()
+    return ""
 
-    if retry:
-        return {
-            "question_text": f"Let's simplify that a bit. Can you give a basic example of how you would use {concept} in a real project?",
-            "concept_tag": concept,
-            "difficulty": "easy",
-        }
-    if remaining < 60:
-        return {
-            "question_text": f"Before we move on, what is one key point you would want me to remember about your experience with {skill}?",
-            "concept_tag": f"{skill}_wrap_up",
-            "difficulty": "easy",
-        }
-    if name == "self_intro":
-        return {
-            "question_text": "Could you briefly introduce yourself and share the experience most relevant to this role?",
-            "concept_tag": "self_introduction",
-            "difficulty": "easy",
-        }
-    if name.lower() in {"behavioural", "behavioral"}:
-        return {
-            "question_text": "Thanks for sharing that. Tell me about a time you faced a difficult problem at work and how you handled it.",
-            "concept_tag": "problem_solving",
-            "difficulty": "medium",
-        }
-    if name.lower() == "cultural":
-        return {
-            "question_text": "That's helpful context. What kind of team environment helps you do your best work?",
-            "concept_tag": "team_environment",
-            "difficulty": "easy",
-        }
-    return {
-        "question_text": f"Thanks, I see the direction you were taking. Can you walk me through a practical project where you used {skill}, including one tradeoff you had to make?",
-        "concept_tag": str(skill),
-        "difficulty": difficulty,
+
+def _question_messages(
+    state: InterviewState,
+    *,
+    section: str,
+    skill: str | None,
+    difficulty: str,
+) -> list[dict[str, str]]:
+    evaluation = state.get("latest_evaluation") or {}
+    context = {
+        "current_section": section,
+        "current_skill": skill,
+        "target_difficulty": difficulty,
+        "previous_response": _latest_candidate_answer(state),
+        "previous_response_strength": evaluation.get("strength"),
+        "previous_response_difficulty": evaluation.get("recommended_difficulty")
+        or state.get("current_difficulty"),
+        "previous_questions": _previous_questions(
+            state,
+            section=section,
+            skill=skill,
+        ),
     }
-
-
-def _prompt(state: InterviewState, section: dict, retry: bool, difficulty: str) -> str:
-    last_eval = state.get("last_evaluation") or {}
-    used = state.get("used_concepts") or state.get("concepts_covered_in_section") or []
-    remaining = int(compute_section_time_remaining(state))
-    section_name = str(section.get("section_name") or section.get("name") or "general")
-    skill = section.get("skill") or section_name
-    retry_instruction = ""
-    if retry:
-        retry_instruction = (
-            "The previous answer was weak or incomplete. Ask one easier question on the SAME concept, "
-            "then the graph will move on to a different concept. Do not make it feel punitive."
-        )
-    elif remaining < 60:
-        retry_instruction = "Less than one minute remains in this section. Ask a quick wrap-up question."
-    elif remaining < 120:
-        retry_instruction = (
-            "Under two minutes remain in this section. Keep the next question focused."
-        )
-    else:
-        retry_instruction = "Ask about a new concept within this section."
-
-    return f"""
-INTERVIEW CONTEXT
-Role: {state.get("role_name") or "the role"}
-Company: {state.get("company_name") or "the company"}
-Current section: {section_name}
-Skill: {skill}
-Priority: {section.get("priority_score") or 5}/10
-Time remaining in section: {remaining} seconds
-Candidate background: {_resume_summary(state)}
-
-RECENT CONVERSATION
-{_history(state)}
-
-LAST ANSWER EVALUATION
-Quality: {last_eval.get("quality", "N/A")}
-Score: {last_eval.get("score", last_eval.get("raw_score", "N/A"))}/10
-Signals present: {", ".join(last_eval.get("signals_present") or last_eval.get("signals_demonstrated") or []) or "none"}
-Signals missing: {", ".join(last_eval.get("signals_missing") or []) or "none"}
-Internal feedback: {last_eval.get("one_line_feedback") or last_eval.get("reasoning") or "N/A"}
-
-PROGRESS
-Questions asked in this section: {state.get("questions_asked_in_section") or section.get("questions_asked") or 0}
-Concepts already covered: {", ".join(str(item) for item in used) if used else "none"}
-Target difficulty: {difficulty}
-
-SPECIAL INSTRUCTIONS
-{retry_instruction}
-""".strip()
-
-
-def _update_section_for_question(
-    state: InterviewState, concept: str
-) -> tuple[list[dict], list[str], int]:
-    sections = [dict(section) for section in state.get("sections") or []]
-    idx = int(state.get("current_section_index") or 0)
-    used = list(
-        state.get("used_concepts") or state.get("concepts_covered_in_section") or []
+    system_prompt = (
+        BEHAVIOURAL_QUESTION_SYSTEM_PROMPT
+        if is_behavioural_cultural_section_name(section)
+        else QUESTION_GENERATION_SYSTEM_PROMPT
     )
-    questions_asked = int(state.get("questions_asked_in_section") or 0) + 1
-    if concept and concept not in used:
-        used.append(concept)
-    if idx < len(sections):
-        section_concepts = list(sections[idx].get("concepts_covered") or [])  # type: ignore
-        if concept and concept not in section_concepts:
-            section_concepts.append(concept)
-        sections[idx]["questions_asked"] = (
-            int(sections[idx].get("questions_asked") or 0) + 1  # type: ignore
-        )
-        sections[idx]["concepts_covered"] = section_concepts
-    return sections, used, questions_asked
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                "Return JSON matching this schema. Ask exactly one fresh question. "
+                f"{compact_json(QuestionGenerationResponse.model_json_schema(), max_chars=1800)}. "
+                f"Context: {compact_json(context, max_chars=2600)}"
+            ),
+        },
+    ]
 
 
-async def generate_question(state: InterviewState) -> dict:
-    if check_interview_complete(state):
-        return {
-            "should_close": True,
-            "session_status": "COMPLETED",
-            "next_node": "closing",
-        }
-
-    if check_section_should_advance(state):
-        return {"next_node": "section_transition"}
-
-    sections = state.get("sections") or []
-    idx = int(state.get("current_section_index") or 0)
-    if idx >= len(sections):
-        return {
-            "should_close": True,
-            "session_status": "COMPLETED",
-            "next_node": "closing",
-        }
-
-    section = sections[idx]
-    retry = state.get("next_question_mode") == "easier_same_concept"
-    fallback = _fallback_question(state, section, retry=retry)  # type: ignore
-    difficulty = (
-        "easy"
-        if retry
-        else difficulty_label(int(state.get("current_difficulty_level") or 2))
-    )
-
-    try:
-        raw = await groq_complete(
-            system=QUESTION_SYSTEM,
-            user=_prompt(state, section, retry, difficulty),  # type: ignore
-            json_mode=True,
-            max_tokens=450,
-            temperature=0.45,
-        )
-        result = parse_json(raw)
-    except Exception:
-        logger.exception("Question generation failed; using fallback question")
-        result = {}
-
-    question = str(
-        result.get("question_text")
-        or result.get("question")
-        or fallback["question_text"]
-    ).strip()
-    if not question:
-        question = fallback["question_text"]
-    difficulty = str(result.get("difficulty") or fallback["difficulty"]).lower()
-    if difficulty not in {"easy", "medium", "hard"}:
-        difficulty = fallback["difficulty"]
-    if retry:
-        difficulty = "easy"
-    concept = str(
-        result.get("concept_tag") or result.get("concept") or fallback["concept_tag"]
-    ).strip()
-    if retry:
-        concept = str(state.get("current_question_concept") or concept)
-
-    turn_number = int(state.get("turn_number") or 0) + 1
-    sections_patch, used, questions_asked = _update_section_for_question(state, concept)
-    section_name = str(section.get("section_name") or section.get("name") or "general")
+def _static_self_intro_question(
+    state: InterviewState,
+    *,
+    section: str,
+    question_id: str,
+    turn_number: int,
+) -> dict[str, Any]:
+    session_id = str(state["interview_session_id"])
     turn = {
+        "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
         "turn_number": turn_number,
         "speaker": "bot",
-        "text": question,
-        "tone": "neutral",
-        "section": section_name,
-        "turn_type": "question",
-        "type": "question",
-        "difficulty": difficulty,
-        "concept": concept,
-        "concept_tag": concept,
-        "weak_retry": retry,
-        "timestamp": time.time(),
+        "tone": "professional",
+        "text": SELF_INTRO_QUESTION,
+        "section": section,
+        "skill": None,
+        "difficulty": "easy",
+        "question_id": question_id,
+        "timestamp": utc_now_iso(),
+        "metadata": {
+            "message_type": "question",
+            "expected_signals": [],
+            "max_answer_secs": 60,
+        },
     }
     return {
-        "current_question": question,
-        "current_question_text": question,
-        "current_question_difficulty": difficulty,
-        "current_question_concept": concept,
-        "turn_number": turn_number,
-        "last_bot_text": question,
-        "bot_reply_text": question,
+        "question_text": SELF_INTRO_QUESTION,
+        "difficulty": "easy",
+        "expected_signals": [],
+        "turn": turn,
+    }
+
+
+async def generate_question(state: InterviewState) -> dict[str, Any]:
+    session_id = str(state["interview_session_id"])
+    turn_number = _next_bot_turn_number(state)
+    asked_questions = list(state.get("asked_questions") or [])
+    section_order = state.get("section_order") or [
+        state.get("current_section") or "general"
+    ]
+    section_index = min(
+        max(0, int(state.get("current_section_index") or 0)),
+        len(section_order) - 1,
+    )
+    section = clean_section_name(section_order[section_index])
+    plan_section = _plan_section(state, section_index)
+    skill = plan_section.get("skill") or (
+        None if section in NON_TECH_SECTIONS else section.replace("_", " ").title()
+    )
+    question_number = _count_section_questions(asked_questions, section) + 1
+    question_id = f"q_{section}_{question_number:03d}"
+    target_difficulty = str(state.get("current_difficulty") or "medium").lower()
+
+    if section == "self_intro":
+        generated = _static_self_intro_question(
+            state,
+            section=section,
+            question_id=question_id,
+            turn_number=turn_number,
+        )
+        question_text = generated["question_text"]
+        difficulty = generated["difficulty"]
+        expected_signals = generated["expected_signals"]
+        turn = generated["turn"]
+    else:
+        response = model_to_dict(
+            await generate_json(
+                _question_messages(
+                    state,
+                    section=section,
+                    skill=skill,
+                    difficulty=target_difficulty,
+                ),
+                QuestionGenerationResponse,
+            )
+        )
+        question_text = clean_text(response["question_text"], max_chars=300)
+        difficulty = str(response.get("difficulty") or target_difficulty).lower()
+        expected_signals = response.get("expected_signals") or []
+        section_remaining_secs = int(state.get("current_section_remaining_secs") or 0)
+        max_answer_secs = max(10, min(90, section_remaining_secs or 60))
+        turn = {
+            "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
+            "turn_number": turn_number,
+            "speaker": "bot",
+            "tone": "professional",
+            "text": question_text,
+            "section": section,
+            "skill": skill,
+            "difficulty": difficulty,
+            "question_id": question_id,
+            "timestamp": utc_now_iso(),
+            "metadata": {
+                "message_type": "question",
+                "expected_signals": expected_signals,
+                "max_answer_secs": max_answer_secs,
+                "generation_rationale": response.get("rationale"),
+            },
+        }
+
+    question_record = {
+        "question_id": question_id,
+        "question_text": question_text,
+        "section": section,
+        "skill": skill,
+        "difficulty": difficulty,
+        "is_followup": False,
+        "expected_signals": expected_signals,
+    }
+    return {
+        "current_section": section,
+        "current_section_index": section_index,
+        "current_section_name": section,
+        "current_skill": skill,
+        "current_question_id": question_id,
+        "current_question_text": question_text,
+        "current_difficulty": difficulty,
+        "asked_questions": [*asked_questions, question_record],
+        "clarification_count_for_current_question": 0,
+        "silence_count_for_current_question": 0,
+        "non_answer_count_for_current_question": 0,
+        "skip_count_for_current_question": 0,
+        "think_silence_count": 0,
+        "awaiting_think_confirmation": False,
+        "think_extension_active": False,
+        "pending_bot_turn": turn,
+        "last_bot_text": question_text,
         "bot_reply_type": "question",
-        "questions_asked_in_section": questions_asked,
-        "concepts_covered_in_section": used,
-        "used_concepts": used,
-        "sections": sections_patch,
-        "candidate_raw_text": "",
-        "response_class": None,
-        "next_question_mode": "normal",
-        "last_question_was_weak_retry": retry,
-        "awaiting_think_decision": False,
-        "think_timer_active": False,
-        "skip_requested": False,
-        "transcript": [turn],
-        "next_node": "await_response",
+        "next_action": None,
+        "next_node": "persist_interview_turn",
     }

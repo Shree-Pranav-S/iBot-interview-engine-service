@@ -1,73 +1,51 @@
-"""Opening/self-introduction question node."""
+"""Opening message node."""
 
 from __future__ import annotations
 
-from src.control.agents.prompts import trim_to_2_sentences
+import random
+from typing import Any
+
 from src.control.agents.state import InterviewState
-from src.data.repositories import interview_workflow_repository as db
+from src.utils.interview_graph import deterministic_turn_id, utc_now_iso
 
 
-def _display_company(name: str | None) -> str:
-    company = (name or "the company").strip()
-    return company.title() if company.islower() else company
-
-
-def _mark_question_on_section(state: InterviewState, concept: str) -> list[dict]:
-    sections = [dict(section) for section in state.get("sections") or []]
-    idx = int(state.get("current_section_index") or 0)
-    if idx < len(sections):
-        concepts = list(sections[idx].get("concepts_covered") or [])  # type: ignore
-        if concept and concept not in concepts:
-            concepts.append(concept)
-        sections[idx]["questions_asked"] = (
-            int(sections[idx].get("questions_asked") or 0) + 1  # type: ignore
-        )
-        sections[idx]["concepts_covered"] = concepts
-    return sections
-
-
-async def opening(state: InterviewState) -> dict:
-    await db.mark_candidate_started(state["candidate_assessment_id"])
-    company = _display_company(state.get("company_name"))
-    text = trim_to_2_sentences(
-        "Hi and welcome to this "
-        f"{company} interview, can you start by telling me a little about "
-        "yourself, including your background and what inspired you to apply "
-        "for this role?"
-    )
+def generate_opening_message(state: InterviewState) -> dict[str, Any]:
+    session_id = str(state["interview_session_id"])
     turn_number = int(state.get("turn_number") or 0) + 1
-    concept = "self_introduction"
-    sections = _mark_question_on_section(state, concept)
-    return {
-        "session_status": "IN_PROGRESS",
-        "current_question": text,
-        "current_question_text": text,
-        "current_question_difficulty": "easy",
-        "current_question_concept": concept,
-        "last_bot_text": text,
-        "bot_reply_text": text,
-        "bot_reply_type": "opening",
+    candidate_name = state.get("candidate_name") or "there"
+    role_name = state.get("role_name") or "the role"
+    company_name = state.get("company_name") or "the company"
+
+    opening_texts = [
+        f"Hi {candidate_name}, welcome to this interview with {company_name} for {role_name}. "
+        "I will ask one question at a time. Please answer naturally, and we will keep moving through the interview.",
+        f"Hello {candidate_name}. Thanks for joining this interview with {company_name} for {role_name}. "
+        "We'll go through the questions one by one. Feel free to answer naturally as we progress.",
+        f"Hi {candidate_name}, glad to have you here for the {company_name} interview for {role_name}. "
+        "I'll be guiding you through a series of questions, one at a time. Just respond naturally, and we'll move through each section together.",
+        f"Welcome, {candidate_name}. Thank you for taking the time to interview with {company_name} for {role_name}. "
+        "I will present the questions one at a time. Please answer them naturally, and we will step through the process.",
+        f"Hello {candidate_name}, welcome to this interview with {company_name} for {role_name}. "
+        "I will ask one question at a time. Go ahead and answer naturally, and we will move along through each part.",
+    ]
+    text = random.choice(opening_texts)
+
+    turn = {
+        "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
         "turn_number": turn_number,
-        "questions_asked_in_section": 1,
-        "concepts_covered_in_section": [concept],
-        "used_concepts": [concept],
-        "sections": sections,
-        "candidate_raw_text": "",
-        "response_class": None,
-        "awaiting_think_decision": False,
-        "think_timer_active": False,
-        "skip_requested": False,
-        "transcript": [
-            {
-                "turn_number": turn_number,
-                "speaker": "bot",
-                "text": text,
-                "tone": "neutral",
-                "section": state.get("current_section_name", "self_intro"),
-                "turn_type": "question",
-                "difficulty": "easy",
-                "concept": concept,
-            }
-        ],
-        "next_node": "await_response",
+        "speaker": "bot",
+        "tone": "professional",
+        "text": text,
+        "section": state.get("current_section") or "opening",
+        "skill": None,
+        "difficulty": state.get("current_difficulty") or "medium",
+        "question_id": None,
+        "timestamp": utc_now_iso(),
+        "metadata": {"message_type": "opening"},
+    }
+    return {
+        "pending_bot_turn": turn,
+        "last_bot_text": text,
+        "bot_reply_type": "opening",
+        "next_node": "persist_interview_turn",
     }

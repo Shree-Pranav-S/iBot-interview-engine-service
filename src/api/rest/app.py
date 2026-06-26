@@ -5,11 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api.middleware.error_handler import register_exception_handlers
-from src.api.rest.routes.demo_websocket import router as demo_ws_router
 from src.api.rest.routes.health import router as health_router
-from src.api.rest.routes.websocket import router as ws_router
+from src.api.rest.routes.livekit import router as livekit_router
 from src.config.settings import settings
-from src.core.services.tts_service import close_tts_client
+from src.control.agents.graphs import close_graph, init_graph
 from src.data.clients.postgres_client import close_db, init_db
 from src.data.clients.redis_client import close_redis, init_redis
 
@@ -18,11 +17,12 @@ from src.data.clients.redis_client import close_redis, init_redis
 async def lifespan(app: FastAPI):
     await init_db()
     await init_redis()
+    await init_graph()
 
     try:
         yield
     finally:
-        await close_tts_client()
+        await close_graph()
         await close_redis()
         await close_db()
 
@@ -31,8 +31,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
     register_exception_handlers(app)
     app.include_router(health_router)
-    app.include_router(ws_router)
-    app.include_router(demo_ws_router)
+    app.include_router(livekit_router)
     return app
 
 
