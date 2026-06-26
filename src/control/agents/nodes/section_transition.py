@@ -13,21 +13,7 @@ from src.utils.interview_graph import (
 )
 
 URGENT_BEHAVIOURAL_TRANSITIONS = (
-    "We need to move on to the behaviour and cultural section as we are short on time.",
-    "We are short on time, so we need to move into the behaviour and cultural "
-    "section now.",
-    "I am going to move us to the behaviour and cultural section now because "
-    "time is almost up.",
-    "Since we have very little time left, we need to shift to the behaviour "
-    "and cultural section.",
-    "We need to cover the behaviour and cultural section now before the interview ends.",
-    "Time is running short, so I will move us to the behaviour and cultural section now.",
-    "I need to switch us to the behaviour and cultural section now so we can "
-    "still capture that signal.",
-    "We are nearly out of time, so let us move to the behaviour and cultural section.",
-    "I will move us to the behaviour and cultural section now because we only "
-    "have a little time left.",
-    "Before we run out of time, we need to cover the behaviour and cultural section.",
+    "Sorry but we need to move on to the behavioural questions due to lack of time,",
 )
 OVERRUN_TRANSITIONS = (
     "Thanks for that. We need to move on to {display} now because we are short "

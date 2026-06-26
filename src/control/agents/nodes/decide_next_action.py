@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.control.agents.nodes.context_utils import (
     behavioural_cultural_requirement_met,
+    behavioural_cultural_section_index,
     is_behavioural_cultural_section,
     is_self_intro_section,
 )
@@ -45,7 +46,24 @@ def decide_next_action(state: InterviewState) -> dict[str, object]:
             "should_close": False,
         }
 
-    if int(state.get("remaining_secs") or 0) > EARLY_COMPLETION_BUFFER_SECS:
+    remaining_secs = int(state.get("remaining_secs") or 0)
+    behavioural_index = behavioural_cultural_section_index(state)
+    if (
+        0 < remaining_secs <= 20
+        and behavioural_index is not None
+        and not is_behavioural_cultural_section(state)
+        and not behavioural_cultural_requirement_met(state)
+    ):
+        return {
+            "next_action": "section_transition",
+            "next_section_index": behavioural_index,
+            "force_behavioural_cultural_due_to_time": True,
+            "force_transition_due_to_overrun": True,
+            "close_after_behavioural_cultural": True,
+            "should_close": False,
+        }
+
+    if remaining_secs > EARLY_COMPLETION_BUFFER_SECS:
         return {"next_action": "next_question", "should_close": False}
 
     return {

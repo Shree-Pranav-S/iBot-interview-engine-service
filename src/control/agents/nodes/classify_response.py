@@ -10,6 +10,7 @@ from src.control.agents.nodes.context_utils import (
     extract_resume_skills,
     is_substantial_answer,
     resume_mentions_skill,
+    word_count,
 )
 from src.control.agents.nodes.llm_helpers import (
     classify_json,
@@ -22,7 +23,14 @@ from src.schemas.prompts import CandidateResponseClassification
 
 logger = logging.getLogger(__name__)
 
-TEXT_SKIP_PATTERNS = re.compile(r"\b(skip|pass|next question|move on)\b", re.I)
+TEXT_SKIP_PATTERNS = re.compile(
+    r"^\s*(?:(?:can|could|would|may)\s+(?:we|you)\s+|please\s+|"
+    r"i\s+(?:want|would like|need)\s+to\s+|let'?s\s+)?"
+    r"(?:(?:skip|pass)(?:\s+(?:this|that|the|current|it|one))?"
+    r"(?:\s+question)?|next\s+question|move\s+on|go\s+next)"
+    r"\s*[?.!]*\s*$",
+    re.I,
+)
 TEXT_REPEAT_PATTERNS = re.compile(r"\b(repeat|say that again|once again)\b", re.I)
 TEXT_REPHRASE_PATTERNS = re.compile(
     r"\b(rephrase|simplify|explain the question|what do you mean)\b",
@@ -34,6 +42,71 @@ TEXT_IRRELEVANT_PATTERNS = re.compile(
     re.I,
 )
 YES_THINK_PATTERNS = re.compile(r"\b(yes|yeah|yep|please|sure|ok|okay)\b", re.I)
+
+
+def _content_tokens(value: str) -> set[str]:
+    stop_words = {
+        "about",
+        "also",
+        "answer",
+        "because",
+        "briefly",
+        "could",
+        "current",
+        "explain",
+        "from",
+        "have",
+        "like",
+        "question",
+        "some",
+        "that",
+        "their",
+        "there",
+        "these",
+        "this",
+        "what",
+        "when",
+        "where",
+        "which",
+        "with",
+        "would",
+        "your",
+    }
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_+#.-]{2,}", value or "")
+        if token.lower() not in stop_words
+    }
+
+
+def _looks_like_answer_attempt(state: InterviewState, text: str) -> bool:
+    """Prefer answer routing for substantive candidate attempts."""
+
+    words = word_count(text)
+    if words >= 20:
+        return True
+
+    lowered = text.lower()
+    if words >= 6 and any(
+        phrase in lowered
+        for phrase in (
+            "i answered",
+            "i just answered",
+            "like i said",
+            "as i said",
+            "from my understanding",
+            "for example",
+        )
+    ):
+        return True
+
+    if words < 8:
+        return False
+
+    skill_tokens = _content_tokens(str(state.get("current_skill") or ""))
+    question_tokens = _content_tokens(str(state.get("current_question_text") or ""))
+    answer_tokens = _content_tokens(text)
+    return bool(answer_tokens & (skill_tokens | question_tokens))
 
 
 def _event_payload(state: InterviewState) -> dict[str, Any]:
@@ -109,6 +182,12 @@ def _heuristic_payload(state: InterviewState, text: str) -> dict[str, Any] | Non
     if TEXT_IRRELEVANT_PATTERNS.search(stripped):
         return {
             "response_type": "irrelevant_answer",
+            "candidate_question_intent": None,
+            "resume_skill_match": False,
+        }
+    if _looks_like_answer_attempt(state, stripped):
+        return {
+            "response_type": "answer",
             "candidate_question_intent": None,
             "resume_skill_match": False,
         }

@@ -33,6 +33,7 @@ from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
 from src.utils.livekit import chunk_for_tts
 
 logger = logging.getLogger("interview-livekit-agent")
+USER_AWAY_TIMEOUT_SECS = 6.0
 
 
 def prewarm(proc: agents.JobProcess) -> None:
@@ -93,6 +94,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._user_turn_started_at: float | None = None
         self._last_user_turn_duration_ms: int | None = None
         self._interview_closed = False
+        self._agent_is_speaking = False
+        self._last_agent_speech_finished_at: float | None = None
+        self._pending_silence_task: asyncio.Task[None] | None = None
+        self._timer_start_task: asyncio.Task[None] | None = None
+        self._timer_start_requested = False
         self._turn_lock = asyncio.Lock()
 
     def _mark_closed_from_state(self) -> bool:
@@ -112,6 +118,83 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 "Failed to shutdown LiveKit session after closing",
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
+
+    def _cancel_pending_silence(self) -> None:
+        task = self._pending_silence_task
+        if task and not task.done():
+            task.cancel()
+        self._pending_silence_task = None
+
+    def _mark_agent_speech_finished(self) -> None:
+        self._agent_is_speaking = False
+        self._last_agent_speech_finished_at = time.monotonic()
+
+    async def _start_timer_after_first_speech(self) -> None:
+        try:
+            await self.bridge.start_timer()
+        except Exception:
+            logger.exception(
+                "Failed to start interview timer on first bot speech",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
+    def _seconds_until_silence_allowed(self) -> float:
+        if self._agent_is_speaking or self._last_agent_speech_finished_at is None:
+            return USER_AWAY_TIMEOUT_SECS
+        elapsed = time.monotonic() - self._last_agent_speech_finished_at
+        return max(0.0, USER_AWAY_TIMEOUT_SECS - elapsed)
+
+    async def _delayed_silence_check(self, delay_secs: float) -> None:
+        try:
+            await asyncio.sleep(max(0.0, delay_secs))
+            await self.handle_user_away()
+        except asyncio.CancelledError:
+            return
+
+    def _schedule_delayed_silence(self, delay_secs: float) -> None:
+        task = self._pending_silence_task
+        if task and not task.done():
+            return
+        self._pending_silence_task = asyncio.create_task(
+            self._delayed_silence_check(delay_secs)
+        )
+
+    async def _stream_text_chunks(self, text: str) -> AsyncIterable[str]:
+        for chunk in chunk_for_tts(text, max_chars=96):
+            yield chunk
+
+    async def _say_text(
+        self,
+        text: str,
+        *,
+        allow_interruptions: bool,
+        add_to_chat_ctx: bool = True,
+    ) -> None:
+        self._cancel_pending_silence()
+        self._agent_is_speaking = True
+        handle = self.session.say(
+            self._stream_text_chunks(text),
+            allow_interruptions=allow_interruptions,
+            add_to_chat_ctx=add_to_chat_ctx,
+        )
+        await handle.wait_for_playout()
+        self._mark_agent_speech_finished()
+
+    def track_agent_state(self, new_state: str) -> None:
+        """Track agent speech so user-away silence starts after bot audio ends."""
+
+        if new_state == "speaking":
+            self._cancel_pending_silence()
+            self._agent_is_speaking = True
+            if not self._timer_start_requested:
+                self._timer_start_requested = True
+                self._timer_start_task = asyncio.create_task(
+                    self._start_timer_after_first_speech()
+                )
+            return
+
+        if self._agent_is_speaking:
+            self._mark_agent_speech_finished()
 
     async def on_enter(self) -> None:
         """Start or resume the interview and speak the opening graph turn."""
@@ -137,17 +220,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
             return
 
-        handle = self.session.say(
+        await self._say_text(
             opening_text,
             allow_interruptions=not self._interview_closed,
             add_to_chat_ctx=True,
         )
-        await handle.wait_for_playout()
         if self._interview_closed:
             self._shutdown_after_closing()
 
     def track_user_state(self, new_state: str) -> None:
         """Record user speech duration for optional graph/timing metadata."""
+
+        if new_state == "speaking":
+            self._cancel_pending_silence()
 
         if new_state == "speaking" and self._user_turn_started_at is None:
             self._user_turn_started_at = time.monotonic()
@@ -189,6 +274,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if self._interview_closed:
             return
 
+        remaining_silence_wait = self._seconds_until_silence_allowed()
+        if remaining_silence_wait > 0.05:
+            self._schedule_delayed_silence(remaining_silence_wait)
+            return
+
         async with self._turn_lock:
             reply_text = await self.bridge.submit_silence()
             is_closing_reply = self._mark_closed_from_state()
@@ -196,12 +286,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if not reply_text:
             return
 
-        handle = self.session.say(
+        await self._say_text(
             reply_text,
             allow_interruptions=not is_closing_reply,
             add_to_chat_ctx=True,
         )
-        await handle.wait_for_playout()
         if is_closing_reply:
             self._shutdown_after_closing()
 
@@ -308,13 +397,16 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             },
             preemptive_generation={"enabled": False},
         ),
-        user_away_timeout=6.0,
+        user_away_timeout=USER_AWAY_TIMEOUT_SECS,
     )
 
     agent = InterviewLiveKitAgent(candidate_assessment_id=str(candidate_assessment_id))
 
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev: agents.AgentStateChangedEvent) -> None:
+        raw_agent_state = getattr(ev.new_state, "value", ev.new_state)
+        agent.track_agent_state(str(raw_agent_state))
+
         logger.info(
             "LiveKit agent state changed",
             extra={

@@ -54,7 +54,28 @@ async def load_interview_context(
 
 
 async def mark_candidate_started(candidate_assessment_id: str | uuid.UUID) -> None:
-    """Move candidate_assessments into IN_PROGRESS on graph start."""
+    """Move candidate_assessments into IN_PROGRESS while audio is preparing."""
+
+    session_factory = await get_session_factory()
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE candidate_assessments
+                SET status = 'IN_PROGRESS',
+                    updated_at = NOW()
+                WHERE id = :candidate_assessment_id
+                """
+            ),
+            {"candidate_assessment_id": _uuid(candidate_assessment_id)},
+        )
+        await session.commit()
+
+
+async def mark_candidate_timer_started(
+    candidate_assessment_id: str | uuid.UUID,
+) -> None:
+    """Record the first bot playout as the interview's official start."""
 
     session_factory = await get_session_factory()
     async with session_factory() as session:

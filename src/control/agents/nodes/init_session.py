@@ -9,7 +9,16 @@ from src.data.repositories import (
     assessment_context_repository,
     interview_session_repository,
 )
-from src.utils.interview_graph import clean_section_name, utc_now_iso
+from src.utils.interview_graph import clean_section_name
+
+BEHAVIOURAL_CULTURAL_SECTION_KEYS = {
+    "behavioural",
+    "behavioral",
+    "cultural",
+    "culture",
+    "behavioural_cultural",
+    "behavioral_cultural",
+}
 
 
 def _max_turn_number(transcript: list[dict[str, Any]]) -> int:
@@ -80,6 +89,55 @@ def _section_budgets(
         if target is None:
             break
         budgets[target] -= 1
+
+    behavioural_sections = [
+        section
+        for section in sections
+        if str(section["section_name"]) in BEHAVIOURAL_CULTURAL_SECTION_KEYS
+    ]
+    behavioural_keys = [
+        str(section["section_name"]) for section in behavioural_sections
+    ]
+    behavioural_cap_secs = max(len(behavioural_keys), total_duration_secs // 10)
+
+    while sum(budgets[key] for key in behavioural_keys) > behavioural_cap_secs:
+        donor = max(behavioural_keys, key=lambda key: budgets[key])
+        if budgets[donor] <= 1:
+            break
+
+        technical_keys = [
+            str(section["section_name"])
+            for section in sections
+            if section.get("skill")
+            and str(section["section_name"]) not in BEHAVIOURAL_CULTURAL_SECTION_KEYS
+        ]
+        receiver_pool = technical_keys or [
+            str(section["section_name"])
+            for section in sections
+            if str(section["section_name"]) not in BEHAVIOURAL_CULTURAL_SECTION_KEYS
+        ]
+        if not receiver_pool:
+            break
+
+        receiver = max(
+            receiver_pool,
+            key=lambda key: (
+                float(
+                    next(
+                        (
+                            section.get("priority_score") or 0
+                            for section in sections
+                            if str(section["section_name"]) == key
+                        ),
+                        0,
+                    )
+                ),
+                budgets[key],
+            ),
+        )
+        budgets[donor] -= 1
+        budgets[receiver] += 1
+
     return budgets
 
 
@@ -139,7 +197,7 @@ async def init_or_resume_session(state: InterviewState) -> dict[str, Any]:
         "soft_total_overrun_secs": max(0, elapsed_secs - total_duration_secs),
         "section_order": section_order,
         "section_budgets": section_budgets,
-        "section_started_at": state.get("section_started_at") or utc_now_iso(),
+        "section_started_at": state.get("section_started_at"),
         "current_section": current_section,
         "current_section_index": current_section_index,
         "current_section_name": current_section,
@@ -185,7 +243,7 @@ async def init_or_resume_session(state: InterviewState) -> dict[str, Any]:
         ),
         "think_extension_active": bool(state.get("think_extension_active") or False),
         "irrelevant_count_total": int(state.get("irrelevant_count_total") or 0),
-        "started_at": state.get("started_at") or utc_now_iso(),
+        "started_at": state.get("started_at"),
         "grace_period_expires_at": None,
         "reconnect_count": int(state.get("reconnect_count") or 0),
         "resumed": bool(transcript),

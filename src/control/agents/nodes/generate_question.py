@@ -32,6 +32,48 @@ SELF_INTRO_QUESTION = (
     "most relevant to this role?"
 )
 
+TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "data_structures": (
+        "list",
+        "dictionary",
+        "dict",
+        "tuple",
+        "set",
+        "array",
+        "map",
+        "hash",
+        "collection",
+    ),
+    "typing_and_runtime": ("type", "typing", "dynamic", "static", "runtime"),
+    "functions_and_scope": ("function", "scope", "lambda", "argument", "parameter"),
+    "oop": ("class", "object", "inheritance", "polymorphism", "method"),
+    "errors_and_debugging": ("exception", "error", "debug", "traceback", "logging"),
+    "modules_and_packages": (
+        "module",
+        "package",
+        "import",
+        "environment",
+        "dependency",
+    ),
+    "concurrency": ("async", "await", "thread", "process", "concurrent", "parallel"),
+    "performance": ("performance", "memory", "complexity", "optimize", "latency"),
+    "testing": ("test", "unit", "mock", "fixture", "coverage"),
+    "web_api": ("api", "http", "request", "response", "endpoint", "fastapi"),
+    "database": ("database", "sql", "query", "transaction", "index", "schema"),
+    "security": ("security", "auth", "token", "permission", "validation"),
+}
+
+TOPIC_ANGLE_ROTATION = (
+    "core_concepts",
+    "practical_usage",
+    "debugging_or_failure_modes",
+    "design_tradeoffs",
+    "performance_or_scalability",
+    "testing_or_validation",
+    "security_or_reliability",
+    "real_project_experience",
+)
+
 
 def _plan_section(state: InterviewState, section_index: int) -> dict[str, Any]:
     runtime_sections = state.get("runtime_sections") or []
@@ -72,6 +114,62 @@ def _previous_questions(
     return questions[-10:]
 
 
+def _topic_hint(question: str) -> str:
+    lowered = question.lower()
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return topic
+    return "general_concept"
+
+
+def _recent_question_topics(
+    state: InterviewState,
+    *,
+    section: str,
+    skill: str | None,
+) -> list[dict[str, str]]:
+    topics: list[dict[str, str]] = []
+    for question in _previous_questions(state, section=section, skill=skill)[-6:]:
+        topics.append(
+            {
+                "topic_hint": _topic_hint(question),
+                "question": question[:180],
+            }
+        )
+    return topics
+
+
+def _topic_diversity_context(
+    state: InterviewState,
+    *,
+    section: str,
+    skill: str | None,
+) -> dict[str, Any]:
+    recent_topics = _recent_question_topics(state, section=section, skill=skill)
+    topic_counts: dict[str, int] = {}
+    for item in recent_topics:
+        topic = item.get("topic_hint") or "general_concept"
+        topic_counts[topic] = topic_counts.get(topic, 0) + 1
+
+    repeated_topics = [
+        topic
+        for topic, count in topic_counts.items()
+        if count >= 2 and topic != "general_concept"
+    ]
+    rotation_index = len(recent_topics) % len(TOPIC_ANGLE_ROTATION)
+    return {
+        "recent_question_topics": recent_topics,
+        "must_shift_topic": bool(repeated_topics),
+        "avoid_recent_topics": repeated_topics[:3],
+        "suggested_fresh_angle": TOPIC_ANGLE_ROTATION[rotation_index],
+        "instruction": (
+            "Use the suggested_fresh_angle and avoid_recent_topics to cover a "
+            "different subtopic inside the same skill. Only stay on the same "
+            "topic when the last answer was weak and needs basic remediation."
+        ),
+    }
+
+
 def _latest_candidate_answer(state: InterviewState) -> str:
     event = state.get("normalized_candidate_event") or {}
     text = str(event.get("text") or "").strip()
@@ -92,10 +190,14 @@ def _question_messages(
 ) -> list[dict[str, str]]:
     evaluation = state.get("latest_evaluation") or {}
     context = {
-        "current_section": section,
         "current_skill": skill,
         "target_difficulty": difficulty,
-        "previous_response": _latest_candidate_answer(state),
+        "topic_diversity": _topic_diversity_context(
+            state,
+            section=section,
+            skill=skill,
+        ),
+        "previous_response": clean_text(_latest_candidate_answer(state), max_chars=650),
         "previous_response_strength": evaluation.get("strength"),
         "previous_response_difficulty": evaluation.get("recommended_difficulty")
         or state.get("current_difficulty"),
@@ -105,11 +207,13 @@ def _question_messages(
             skill=skill,
         ),
     }
+
     system_prompt = (
         BEHAVIOURAL_QUESTION_SYSTEM_PROMPT
         if is_behavioural_cultural_section_name(section)
         else QUESTION_GENERATION_SYSTEM_PROMPT
     )
+
     return [
         {"role": "system", "content": system_prompt},
         {
@@ -117,7 +221,7 @@ def _question_messages(
             "content": (
                 "Return JSON matching this schema. Ask exactly one fresh question. "
                 f"{compact_json(QuestionGenerationResponse.model_json_schema(), max_chars=1800)}. "
-                f"Context: {compact_json(context, max_chars=2600)}"
+                f"Context: {compact_json(context, max_chars=2200)}"
             ),
         },
     ]
@@ -201,7 +305,7 @@ async def generate_question(state: InterviewState) -> dict[str, Any]:
         )
         question_text = clean_text(response["question_text"], max_chars=300)
         difficulty = str(response.get("difficulty") or target_difficulty).lower()
-        expected_signals = response.get("expected_signals") or []
+        expected_signals = list(response.get("expected_signals") or [])[:4]
         section_remaining_secs = int(state.get("current_section_remaining_secs") or 0)
         max_answer_secs = max(10, min(90, section_remaining_secs or 60))
         turn = {

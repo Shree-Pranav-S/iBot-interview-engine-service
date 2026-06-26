@@ -6,8 +6,6 @@ import logging
 from datetime import UTC, datetime
 
 from src.control.agents.nodes.context_utils import (
-    behavioural_cultural_requirement_met,
-    behavioural_cultural_section_index,
     is_behavioural_cultural_section,
 )
 from src.control.agents.state import InterviewState
@@ -15,7 +13,6 @@ from src.data.repositories import interview_session_repository
 
 logger = logging.getLogger(__name__)
 SOFT_OVERRUN_GRACE_SECS = 0
-BEHAVIOURAL_CULTURAL_DETOUR_REMAINING_SECS = 20
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -78,32 +75,28 @@ async def check_time_budget(state: InterviewState) -> dict[str, object]:
 
     response_completed = bool(state.get("last_candidate_event"))
     next_action = state.get("next_action") or "continue"
-    force_close = remaining_secs <= 0 and response_completed
+    behavioural_budget_exhausted = (
+        is_behavioural_cultural_section(state)
+        and bool(section_budget)
+        and section_elapsed >= section_budget
+        and response_completed
+    )
+    force_close = (
+        remaining_secs <= 0 or behavioural_budget_exhausted
+    ) and response_completed
     force_transition = (
         section_overrun > 0 and response_completed and _has_next_section(state)
     )
     force_behavioural_cultural = False
     next_section_index = state.get("next_section_index")
     closing_reason = state.get("closing_reason")
-    behavioural_index = behavioural_cultural_section_index(state)
-    should_detour_to_behavioural = (
-        response_completed
-        and 0 < remaining_secs <= BEHAVIOURAL_CULTURAL_DETOUR_REMAINING_SECS
-        and behavioural_index is not None
-        and int(state.get("current_section_index") or 0) != behavioural_index
-        and not is_behavioural_cultural_section(state)
-        and not behavioural_cultural_requirement_met(state)
-    )
-
     if force_close or state.get("last_response_type") == "timer_expired":
         next_action = "complete"
-        closing_reason = closing_reason or "time_expired"
-    elif should_detour_to_behavioural:
-        next_action = "section_transition"
-        next_section_index = behavioural_index
-        closing_reason = None
-        force_transition = True
-        force_behavioural_cultural = True
+        closing_reason = closing_reason or (
+            "behavioural_cultural_budget_exhausted"
+            if behavioural_budget_exhausted
+            else "time_expired"
+        )
     elif force_transition:
         next_action = "section_transition"
         next_section_index = int(state.get("current_section_index") or 0) + 1

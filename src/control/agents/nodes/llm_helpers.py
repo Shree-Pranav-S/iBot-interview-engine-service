@@ -63,7 +63,9 @@ def _extract_json(raw: str) -> dict[str, Any]:
 def _has_llm_key() -> bool:
     if os.getenv("IBOT_DISABLE_LLM_CALLS") == "1":
         return False
-    return bool(settings.GROQ_API_KEY or settings.FALLBACK_GROQ_API_KEY)
+    primary = str(settings.GROQ_API_KEY or "").strip().strip('"').strip("'")
+    fallback = str(settings.FALLBACK_GROQ_API_KEY or "").strip().strip('"').strip("'")
+    return bool(primary or fallback)
 
 
 def _extra_error_locs(exc: ValidationError) -> list[str]:

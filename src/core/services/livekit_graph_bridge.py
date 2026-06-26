@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.core.services.interview_service import InterviewOrchestrator
+from src.data.repositories import assessment_context_repository
+from src.utils.interview_graph import utc_now_iso
 from src.utils.interview_turns import extract_bot_reply
 
 
@@ -28,6 +30,27 @@ class LiveKitInterviewBridge:
 
         self.state = state
         return extract_bot_reply(previous, state)
+
+    async def start_timer(self) -> bool:
+        """Start the durable time budget when the interviewer first speaks."""
+
+        state = self.state or await self.orchestrator.get_current_state()
+        if not state or state.get("started_at"):
+            self.state = state
+            return False
+
+        started_at = utc_now_iso()
+        self.state = await self.orchestrator.runner.update_state(
+            self.candidate_assessment_id,
+            {
+                "started_at": started_at,
+                "section_started_at": state.get("section_started_at") or started_at,
+            },
+        )
+        await assessment_context_repository.mark_candidate_timer_started(
+            self.candidate_assessment_id
+        )
+        return True
 
     async def submit_candidate_turn(
         self,

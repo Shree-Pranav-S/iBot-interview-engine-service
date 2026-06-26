@@ -18,10 +18,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "interview-engine-service"
     APP_ENV: str = Field(default="development")
 
-    # ── Deepgram (STT + TTS) ──────────────────────────────────────────────────
+    # â”€â”€ Deepgram (STT + TTS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     DEEPGRAM_API_KEY: str = Field(default="")
     DEEPGRAM_STT_MODEL: str = Field(default="nova-3")
-    DEEPGRAM_TTS_MODEL: str = Field(default="aura-asteria-en")
+    DEEPGRAM_TTS_MODEL: str = Field(default="aura-2-andromeda-en")
     DEEPGRAM_KEYTERMS: str = Field(
         default=(
             "FastAPI,LangGraph,React,TypeScript,PostgreSQL,Redis,Docker,"
@@ -29,16 +29,17 @@ class Settings(BaseSettings):
         )
     )
 
-    # ── Groq (LLM) ───────────────────────────────────────────────────────────
+    # â”€â”€ Groq (LLM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_API_KEY: str = Field(default="")
     FALLBACK_GROQ_API_KEY: str = Field(default="")
+    GROQ_HOLISTIC_EVALUATION_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.1-8b-instant")
     GROQ_MAX_TOKENS: int = Field(default=400)
     GROQ_TEMPERATURE: float = Field(default=0.3)
 
-    # ── Groq Evaluation Model ────────────────────────────────────────────────
+    # â”€â”€ Groq Evaluation Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_EVAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    GROQ_EVAL_MAX_TOKENS: int = Field(default=8192)
+    GROQ_EVAL_MAX_TOKENS: int = Field(default=4096)
     GROQ_EVAL_TEMPERATURE: float = Field(default=0.1)
     GROQ_EVAL_TIMEOUT_SECS: float = Field(default=120.0)
 
@@ -47,12 +48,12 @@ class Settings(BaseSettings):
     GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=96)
     GROQ_LIVE_EVAL_TEMPERATURE: float = Field(default=0.0)
 
-    # ── Groq Classification Model ────────────────────────────────────────────
+    # â”€â”€ Groq Classification Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")
     GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=32)
     GROQ_CLASSIFY_TEMPERATURE: float = Field(default=0.0)
 
-    # ── Livekit (Real-time Communication) ───────────────────────────────────
+    # â”€â”€ Livekit (Real-time Communication) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     LIVEKIT_URL: str = Field(default="")
     LIVEKIT_API_KEY: str = Field(default="")

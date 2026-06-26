@@ -17,16 +17,11 @@ def generate_opening_message(state: InterviewState) -> dict[str, Any]:
     company_name = state.get("company_name") or "the company"
 
     opening_texts = [
-        f"Hi {candidate_name}, welcome to this interview with {company_name} for {role_name}. "
-        "I will ask one question at a time. Please answer naturally, and we will keep moving through the interview.",
-        f"Hello {candidate_name}. Thanks for joining this interview with {company_name} for {role_name}. "
-        "We'll go through the questions one by one. Feel free to answer naturally as we progress.",
-        f"Hi {candidate_name}, glad to have you here for the {company_name} interview for {role_name}. "
-        "I'll be guiding you through a series of questions, one at a time. Just respond naturally, and we'll move through each section together.",
-        f"Welcome, {candidate_name}. Thank you for taking the time to interview with {company_name} for {role_name}. "
-        "I will present the questions one at a time. Please answer them naturally, and we will step through the process.",
-        f"Hello {candidate_name}, welcome to this interview with {company_name} for {role_name}. "
-        "I will ask one question at a time. Go ahead and answer naturally, and we will move along through each part.",
+        f"Hi {candidate_name}, welcome to your {company_name} interview for {role_name}.",
+        f"Hello {candidate_name}, thanks for joining the {company_name} interview for {role_name}.",
+        f"Welcome, {candidate_name}. This is your {company_name} interview for {role_name}.",
+        f"Hi {candidate_name}, glad to have you here for the {role_name} interview with {company_name}.",
+        f"Hello {candidate_name}, welcome to this live interview with {company_name}.",
     ]
     text = random.choice(opening_texts)
 
