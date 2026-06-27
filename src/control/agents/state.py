@@ -16,15 +16,16 @@ SessionStatus = Literal[
 Difficulty = Literal["easy", "medium", "hard"]
 ResponseType = Literal[
     "answer",
-    "clarification_question",
+    "clarification",
     "silence",
-    "irrelevant_answer",
+    "irrelevant",
     "non_answer",
     "technical_issue",
     "interruption",
     "disconnect",
     "skip",
     "think_request",
+    "no_think",
     "timer_expired",
 ]
 
@@ -82,6 +83,9 @@ class InterviewState(TypedDict, total=False):
     last_response_substantial: bool | None
     last_response_reason: str | None
     last_classification: dict[str, Any] | None
+    local_route: dict[str, Any] | None
+    live_decision: dict[str, Any] | None
+    last_answer_strength: str | None
     last_bot_text: str | None
     bot_reply_text: str
     bot_reply_type: str
@@ -91,6 +95,7 @@ class InterviewState(TypedDict, total=False):
     skill_progress: dict[str, Any]
     live_evaluations: list[dict[str, Any]]
     latest_evaluation: dict[str, Any] | None
+    expected_signals: list[str]
     clarification_count_for_current_question: int
     silence_count_for_current_question: int
     non_answer_count_for_current_question: int

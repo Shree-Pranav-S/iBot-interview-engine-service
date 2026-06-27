@@ -19,6 +19,11 @@ BEHAVIOURAL_CULTURAL_SECTION_KEYS = {
     "behavioural_cultural",
     "behavioral_cultural",
 }
+PLAN_DIFFICULTY_TO_RUNTIME = {
+    "junior level": "easy",
+    "mid-level": "medium",
+    "senior level": "hard",
+}
 
 
 def _max_turn_number(transcript: list[dict[str, Any]]) -> int:
@@ -161,6 +166,13 @@ async def init_or_resume_session(state: InterviewState) -> dict[str, Any]:
         )
 
     interview_plan = _dict(context.get("interview_plan"))
+    inferred_difficulty = (
+        str(interview_plan.get("inferred_difficulty") or "").strip().lower()
+    )
+    initial_difficulty = PLAN_DIFFICULTY_TO_RUNTIME.get(
+        inferred_difficulty,
+        "medium",
+    )
     duration_mins = int(
         interview_plan.get("total_mins") or context.get("interview_duration_mins") or 30
     )
@@ -215,7 +227,7 @@ async def init_or_resume_session(state: InterviewState) -> dict[str, Any]:
         "force_behavioural_cultural_due_to_time": False,
         "close_after_behavioural_cultural": False,
         "current_skill": current.get("skill"),
-        "current_difficulty": state.get("current_difficulty") or "medium",
+        "current_difficulty": state.get("current_difficulty") or initial_difficulty,
         "session_status": "IN_PROGRESS",
         "turn_number": _max_turn_number(transcript),
         "recent_turns": transcript[-8:],
@@ -225,6 +237,10 @@ async def init_or_resume_session(state: InterviewState) -> dict[str, Any]:
         "skill_progress": dict(state.get("skill_progress") or {}),
         "live_evaluations": list(state.get("live_evaluations") or []),
         "latest_evaluation": state.get("latest_evaluation"),
+        "expected_signals": list(state.get("expected_signals") or []),
+        "local_route": state.get("local_route"),
+        "live_decision": state.get("live_decision"),
+        "last_answer_strength": state.get("last_answer_strength"),
         "clarification_count_for_current_question": int(
             state.get("clarification_count_for_current_question") or 0
         ),

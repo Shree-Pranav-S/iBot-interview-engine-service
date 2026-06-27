@@ -48,7 +48,7 @@ def await_candidate_response_interrupt(state: InterviewState) -> dict[str, Any]:
     event_type = str(event.get("event_type") or "candidate_answer")
     response_type = {
         "candidate_answer": "answer",
-        "candidate_clarification": "clarification_question",
+        "candidate_clarification": "clarification",
         "silence_timeout": "silence",
         "candidate_disconnect": "disconnect",
         "technical_issue": "technical_issue",

@@ -246,8 +246,14 @@ async def update_elapsed_time(
     await _execute(
         """
         UPDATE interview_sessions
-        SET total_elapsed_secs = :elapsed_secs,
-            total_pause_secs = :total_pause_secs,
+        SET total_elapsed_secs = GREATEST(
+                COALESCE(total_elapsed_secs, 0),
+                :elapsed_secs
+            ),
+            total_pause_secs = GREATEST(
+                COALESCE(total_pause_secs, 0),
+                :total_pause_secs
+            ),
             last_updated_at = NOW()
         WHERE id = :session_id
         """,

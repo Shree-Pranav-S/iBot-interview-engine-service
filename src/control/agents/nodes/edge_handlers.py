@@ -293,14 +293,7 @@ def handle_silence(state: InterviewState) -> dict[str, Any]:
 
     if state.get("think_extension_active"):
         think_count = int(state.get("think_silence_count") or 0) + 1
-        if think_count <= 2:
-            return {
-                "silence_count_for_current_question": count,
-                "think_silence_count": think_count,
-                "next_node": "await_candidate_response_interrupt",
-                "next_action": None,
-            }
-        if think_count == 3:
+        if think_count == 1:
             prompt = _pick(THINK_NUDGE_RESPONSES, state, "think-nudge")
             return _same_question_payload(
                 state,

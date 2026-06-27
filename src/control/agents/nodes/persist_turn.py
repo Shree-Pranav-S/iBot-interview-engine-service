@@ -95,10 +95,8 @@ async def persist_interview_turn(state: InterviewState) -> dict[str, Any]:
         updates.update(
             {
                 "last_candidate_event": state.get("normalized_candidate_event"),
-                "last_response_type": (
-                    (state.get("normalized_candidate_event") or {}).get("response_type")
-                    or state.get("last_response_type")
-                ),
+                "last_response_type": state.get("last_response_type")
+                or (state.get("normalized_candidate_event") or {}).get("response_type"),
             }
         )
 

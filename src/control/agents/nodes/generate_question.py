@@ -27,9 +27,17 @@ from src.utils.interview_graph import (
     utc_now_iso,
 )
 
-SELF_INTRO_QUESTION = (
-    "To start, could you briefly introduce yourself and highlight the experience "
-    "most relevant to this role?"
+SELF_INTRO_QUESTIONS = (
+    "To start, could you briefly introduce yourself and highlight the experience most relevant to this role?",
+    "Please introduce yourself and share the parts of your background that best fit this role.",
+    "Could you give me a short overview of your background, recent work, and strongest skills?",
+    "Let's begin with your introduction. Please tell me about your experience and what you bring to this role.",
+    "Could you walk me through your professional background and the work you are most proud of?",
+    "Please start by introducing yourself and summarizing your relevant projects or responsibilities.",
+    "Could you share who you are professionally and the experience that makes you a good fit here?",
+    "Let's start with your background. Please tell me about your current skills and recent experience.",
+    "Could you introduce yourself and mention the technical or professional areas where you have hands-on experience?",
+    "Please give me a brief professional introduction, including your recent role, key strengths, and relevant experience.",
 )
 
 TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -235,12 +243,14 @@ def _static_self_intro_question(
     turn_number: int,
 ) -> dict[str, Any]:
     session_id = str(state["interview_session_id"])
+    index = sum(ord(char) for char in question_id) % len(SELF_INTRO_QUESTIONS)
+    question_text = SELF_INTRO_QUESTIONS[index]
     turn = {
         "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
         "turn_number": turn_number,
         "speaker": "bot",
         "tone": "professional",
-        "text": SELF_INTRO_QUESTION,
+        "text": question_text,
         "section": section,
         "skill": None,
         "difficulty": "easy",
@@ -253,7 +263,7 @@ def _static_self_intro_question(
         },
     }
     return {
-        "question_text": SELF_INTRO_QUESTION,
+        "question_text": question_text,
         "difficulty": "easy",
         "expected_signals": [],
         "turn": turn,

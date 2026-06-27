@@ -13,7 +13,7 @@ import time
 from collections.abc import AsyncIterable
 from typing import Any
 
-from livekit import agents, rtc
+from livekit import agents
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -33,12 +33,18 @@ from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
 from src.utils.livekit import chunk_for_tts
 
 logger = logging.getLogger("interview-livekit-agent")
-USER_AWAY_TIMEOUT_SECS = 6.0
+USER_AWAY_TIMEOUT_SECS = 5.0
+THINK_EXTENSION_TIMEOUT_SECS = 15.0
+POST_TURN_SILENCE_GUARD_SECS = 1.25
 
 
 def prewarm(proc: agents.JobProcess) -> None:
     """Load expensive models once per worker process."""
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=0.3,
+        min_silence_duration=0.5,
+        prefix_padding_duration=0.2,
+    )
 
 
 server = AgentServer(
@@ -93,10 +99,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._pending_duration_ms: int | None = None
         self._user_turn_started_at: float | None = None
         self._last_user_turn_duration_ms: int | None = None
+        self._last_user_turn_finished_at: float | None = None
         self._interview_closed = False
         self._agent_is_speaking = False
         self._last_agent_speech_finished_at: float | None = None
         self._pending_silence_task: asyncio.Task[None] | None = None
+        self._awaiting_agent_reply = False
         self._timer_start_task: asyncio.Task[None] | None = None
         self._timer_start_requested = False
         self._turn_lock = asyncio.Lock()
@@ -139,10 +147,16 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
 
     def _seconds_until_silence_allowed(self) -> float:
+        state = self.bridge.state or {}
+        timeout_secs = (
+            THINK_EXTENSION_TIMEOUT_SECS
+            if state.get("bot_reply_type") == "think_wait"
+            else USER_AWAY_TIMEOUT_SECS
+        )
         if self._agent_is_speaking or self._last_agent_speech_finished_at is None:
-            return USER_AWAY_TIMEOUT_SECS
+            return timeout_secs
         elapsed = time.monotonic() - self._last_agent_speech_finished_at
-        return max(0.0, USER_AWAY_TIMEOUT_SECS - elapsed)
+        return max(0.0, timeout_secs - elapsed)
 
     async def _delayed_silence_check(self, delay_secs: float) -> None:
         try:
@@ -186,6 +200,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if new_state == "speaking":
             self._cancel_pending_silence()
             self._agent_is_speaking = True
+            self._awaiting_agent_reply = False
             if not self._timer_start_requested:
                 self._timer_start_requested = True
                 self._timer_start_task = asyncio.create_task(
@@ -236,6 +251,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if new_state == "speaking" and self._user_turn_started_at is None:
             self._user_turn_started_at = time.monotonic()
+            self._last_user_turn_finished_at = None
             return
 
         if new_state == "speaking" or self._user_turn_started_at is None:
@@ -245,6 +261,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             (time.monotonic() - self._user_turn_started_at) * 1000
         )
         self._user_turn_started_at = None
+        self._last_user_turn_finished_at = time.monotonic()
 
     async def on_user_turn_completed(
         self,
@@ -267,12 +284,29 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._pending_duration_ms = self._last_user_turn_duration_ms
         self._last_user_turn_duration_ms = None
         self._pending_user_text = candidate_text
+        self._awaiting_agent_reply = True
+        self._cancel_pending_silence()
 
     async def handle_user_away(self) -> None:
         """Resume the graph with its existing silence sentinel."""
 
         if self._interview_closed:
             return
+
+        if (
+            self._pending_user_text
+            or self._awaiting_agent_reply
+            or self._turn_lock.locked()
+        ):
+            return
+
+        if self._last_user_turn_finished_at is not None:
+            turn_completion_wait = POST_TURN_SILENCE_GUARD_SECS - (
+                time.monotonic() - self._last_user_turn_finished_at
+            )
+            if turn_completion_wait > 0.05:
+                self._schedule_delayed_silence(turn_completion_wait)
+                return
 
         remaining_silence_wait = self._seconds_until_silence_allowed()
         if remaining_silence_wait > 0.05:
@@ -314,29 +348,32 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if not candidate_text:
             return
 
-        async with self._turn_lock:
-            try:
-                reply_text = await self.bridge.submit_candidate_turn(
-                    candidate_text,
-                    duration_ms=duration_ms,
-                )
-                is_closing_reply = self._mark_closed_from_state()
-            except Exception:
-                logger.exception("LangGraph turn failed")
-                reply_text = (
-                    "I had a brief issue processing that response. "
-                    "Let's continue with the next question."
-                )
-                is_closing_reply = False
+        try:
+            async with self._turn_lock:
+                try:
+                    reply_text = await self.bridge.submit_candidate_turn(
+                        candidate_text,
+                        duration_ms=duration_ms,
+                    )
+                    is_closing_reply = self._mark_closed_from_state()
+                except Exception:
+                    logger.exception("LangGraph turn failed")
+                    reply_text = (
+                        "I had a brief issue processing that response. "
+                        "Let's continue with the next question."
+                    )
+                    is_closing_reply = False
 
-        if not reply_text:
-            return
+            if not reply_text:
+                return
 
-        for chunk in chunk_for_tts(reply_text):
-            yield chunk
+            for chunk in chunk_for_tts(reply_text):
+                yield chunk
 
-        if is_closing_reply:
-            self._shutdown_after_closing()
+            if is_closing_reply:
+                self._shutdown_after_closing()
+        finally:
+            self._awaiting_agent_reply = False
 
 
 async def request_fnc(req: agents.JobRequest) -> None:
@@ -379,17 +416,20 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             api_key=settings.DEEPGRAM_API_KEY or agents.NOT_GIVEN,
         ),
         turn_handling=TurnHandlingOptions(
-            turn_detection=inference.TurnDetector(),
+            turn_detection=inference.TurnDetector(
+                version="v1",
+                api_key=settings.LIVEKIT_API_KEY,
+                api_secret=settings.LIVEKIT_API_SECRET,
+            ),
             endpointing={
                 "mode": "dynamic",
-                "min_delay": 0.7,
-                "max_delay": 5.0,
-                "alpha": 0.85,
+                "min_delay": 1.0,
+                "max_delay": 3.0,
             },
             interruption={
                 "enabled": True,
                 "mode": "adaptive",
-                "min_duration": 0.45,
+                "min_duration": 0.5,
                 "min_words": 1,
                 "false_interruption_timeout": 2.0,
                 "resume_false_interruption": True,
@@ -458,16 +498,11 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         )
 
     logger.info(
-        "Connecting LiveKit job with relay transport",
+        "Connecting LiveKit job with automatic ICE transport selection",
         extra={"candidate_assessment_id": candidate_assessment_id},
     )
-    await ctx.connect(
-        auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY,
-        rtc_config=rtc.RtcConfiguration(
-            ice_transport_type=rtc.IceTransportType.Value("TRANSPORT_RELAY"),
-        ),
-        single_peer_connection=True,
-    )
+    await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
+    await ctx.wait_for_participant()
 
     await session.start(agent=agent, room=ctx.room)
 
