@@ -107,6 +107,13 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._awaiting_agent_reply = False
         self._timer_start_task: asyncio.Task[None] | None = None
         self._timer_start_requested = False
+        self._pending_section_barge_task: asyncio.Task[None] | None = None
+        self._barge_in_active = False
+        self._discard_inflight_user_turn = False
+        self._live_user_transcript = ""
+        self._committed_user_transcript = ""
+        self._current_user_interim = ""
+        self._closing_finalize_requested = False
         self._turn_lock = asyncio.Lock()
 
     def _mark_closed_from_state(self) -> bool:
@@ -118,7 +125,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         )
         return self._interview_closed
 
-    def _shutdown_after_closing(self) -> None:
+    async def _finalize_after_closing(self) -> None:
+        if self._closing_finalize_requested:
+            return
+        self._closing_finalize_requested = True
+        self._cancel_pending_section_barge()
+        try:
+            self.session.input.set_audio_enabled(False)
+            await self.bridge.finalize_closing()
+        except Exception:
+            logger.exception(
+                "Failed to finalize interview after closing",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
         try:
             self.session.shutdown(drain=True)
         except Exception:
@@ -129,7 +148,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
     def _cancel_pending_silence(self) -> None:
         task = self._pending_silence_task
-        if task and not task.done():
+        current_task = asyncio.current_task()
+        if task and task is not current_task and not task.done():
             task.cancel()
         self._pending_silence_task = None
 
@@ -140,11 +160,42 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
     async def _start_timer_after_first_speech(self) -> None:
         try:
             await self.bridge.start_timer()
+            self._schedule_section_barge_watchdog()
         except Exception:
             logger.exception(
                 "Failed to start interview timer on first bot speech",
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
+
+    def _cancel_pending_section_barge(self) -> None:
+        task = self._pending_section_barge_task
+        current_task = asyncio.current_task()
+        if task and task is not current_task and not task.done():
+            task.cancel()
+        self._pending_section_barge_task = None
+
+    async def _delayed_section_barge(self, delay_secs: float) -> None:
+        try:
+            await asyncio.sleep(max(0.0, delay_secs))
+            await self.handle_section_time_barge_in()
+        except asyncio.CancelledError:
+            return
+
+    def _schedule_section_barge_watchdog(self) -> None:
+        if (
+            self._interview_closed
+            or self._barge_in_active
+            or self._agent_is_speaking
+            or not self._timer_start_requested
+        ):
+            return
+        delay = self.bridge.seconds_until_section_barge_in()
+        if delay is None:
+            return
+        self._cancel_pending_section_barge()
+        self._pending_section_barge_task = asyncio.create_task(
+            self._delayed_section_barge(delay)
+        )
 
     def _seconds_until_silence_allowed(self) -> float:
         state = self.bridge.state or {}
@@ -199,6 +250,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if new_state == "speaking":
             self._cancel_pending_silence()
+            if not self._barge_in_active:
+                self._cancel_pending_section_barge()
             self._agent_is_speaking = True
             self._awaiting_agent_reply = False
             if not self._timer_start_requested:
@@ -210,6 +263,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if self._agent_is_speaking:
             self._mark_agent_speech_finished()
+            if self._interview_closed:
+                if not self._closing_finalize_requested:
+                    asyncio.create_task(self._finalize_after_closing())
+            elif not self._barge_in_active:
+                self._schedule_section_barge_watchdog()
 
     async def on_enter(self) -> None:
         """Start or resume the interview and speak the opening graph turn."""
@@ -241,13 +299,17 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             add_to_chat_ctx=True,
         )
         if self._interview_closed:
-            self._shutdown_after_closing()
+            await self._finalize_after_closing()
 
     def track_user_state(self, new_state: str) -> None:
         """Record user speech duration for optional graph/timing metadata."""
 
         if new_state == "speaking":
             self._cancel_pending_silence()
+            if self._discard_inflight_user_turn and not self._barge_in_active:
+                # A new post-transition turn is valid; only the interrupted turn
+                # should be discarded.
+                self._discard_inflight_user_turn = False
 
         if new_state == "speaking" and self._user_turn_started_at is None:
             self._user_turn_started_at = time.monotonic()
@@ -263,6 +325,43 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._user_turn_started_at = None
         self._last_user_turn_finished_at = time.monotonic()
 
+    def track_user_transcription(self, text: str, *, is_final: bool) -> None:
+        """Accumulate final STT chunks and retain the latest interim suffix."""
+
+        normalized = " ".join((text or "").split())
+        if is_final:
+            if normalized:
+                committed = self._committed_user_transcript
+                if not committed or normalized.casefold().startswith(
+                    committed.casefold()
+                ):
+                    self._committed_user_transcript = normalized
+                elif not committed.casefold().endswith(normalized.casefold()):
+                    self._committed_user_transcript = (
+                        f"{committed} {normalized}".strip()
+                    )
+            self._current_user_interim = ""
+        else:
+            self._current_user_interim = normalized
+
+        committed = self._committed_user_transcript
+        interim = self._current_user_interim
+        if (
+            committed
+            and interim
+            and interim.casefold().startswith(committed.casefold())
+        ):
+            self._live_user_transcript = interim
+        else:
+            self._live_user_transcript = " ".join(
+                item for item in (committed, interim) if item
+            ).strip()
+
+    def _clear_live_user_transcript(self) -> None:
+        self._live_user_transcript = ""
+        self._committed_user_transcript = ""
+        self._current_user_interim = ""
+
     async def on_user_turn_completed(
         self,
         turn_ctx: ChatContext,
@@ -271,6 +370,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         """Capture only LiveKit-confirmed user turns for graph submission."""
 
         if self._interview_closed:
+            raise StopResponse()
+
+        if self._barge_in_active or self._discard_inflight_user_turn:
+            self._discard_inflight_user_turn = False
             raise StopResponse()
 
         candidate_text = " ".join((new_message.text_content or "").split())
@@ -284,13 +387,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._pending_duration_ms = self._last_user_turn_duration_ms
         self._last_user_turn_duration_ms = None
         self._pending_user_text = candidate_text
+        self._clear_live_user_transcript()
         self._awaiting_agent_reply = True
         self._cancel_pending_silence()
 
     async def handle_user_away(self) -> None:
-        """Resume the graph with its existing silence sentinel."""
+        """Recover buffered speech, or submit silence when no speech exists."""
 
         if self._interview_closed:
+            return
+
+        state = self.bridge.state or {}
+        if state.get("phase_complete") or state.get("should_advance_question"):
+            # Do not start a silence flow while transitioning or closing.
             return
 
         if (
@@ -298,6 +407,67 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             or self._awaiting_agent_reply
             or self._turn_lock.locked()
         ):
+            return
+
+        buffered_candidate_text = " ".join(self._live_user_transcript.split())
+        if buffered_candidate_text:
+            self._cancel_pending_silence()
+            async with self._turn_lock:
+                if self._pending_user_text or self._awaiting_agent_reply:
+                    return
+                buffered_candidate_text = " ".join(self._live_user_transcript.split())
+                if not buffered_candidate_text:
+                    return
+
+                # LiveKit occasionally emits complete STT chunks without
+                # finalizing a turn. Recover that speech as an answer and
+                # suppress a later duplicate turn-completed callback.
+                self._discard_inflight_user_turn = True
+                self._awaiting_agent_reply = True
+                duration_ms = self._last_user_turn_duration_ms
+                self._last_user_turn_duration_ms = None
+                self._clear_live_user_transcript()
+                logger.info(
+                    "Recovering buffered candidate speech before silence handling",
+                    extra={
+                        "candidate_assessment_id": (
+                            self.bridge.candidate_assessment_id
+                        ),
+                        "text_length": len(buffered_candidate_text),
+                    },
+                )
+                try:
+                    reply_text = await self.bridge.submit_candidate_turn(
+                        buffered_candidate_text,
+                        duration_ms=duration_ms,
+                    )
+                    is_closing_reply = self._mark_closed_from_state()
+                except Exception:
+                    logger.exception(
+                        "Buffered candidate-turn recovery failed",
+                        extra={
+                            "candidate_assessment_id": (
+                                self.bridge.candidate_assessment_id
+                            )
+                        },
+                    )
+                    reply_text = (
+                        "I had a brief issue processing that response. "
+                        "Let's continue with the next question."
+                    )
+                    is_closing_reply = False
+                finally:
+                    self._awaiting_agent_reply = False
+
+            if not reply_text:
+                return
+            await self._say_text(
+                reply_text,
+                allow_interruptions=not is_closing_reply,
+                add_to_chat_ctx=True,
+            )
+            if is_closing_reply:
+                await self._finalize_after_closing()
             return
 
         if self._last_user_turn_finished_at is not None:
@@ -326,7 +496,56 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             add_to_chat_ctx=True,
         )
         if is_closing_reply:
-            self._shutdown_after_closing()
+            await self._finalize_after_closing()
+
+    async def handle_section_time_barge_in(self) -> None:
+        """Interrupt an overrun section, including during candidate speech."""
+
+        if self._interview_closed or self._barge_in_active:
+            return
+
+        remaining = self.bridge.seconds_until_section_barge_in()
+        if remaining is None:
+            return
+        if remaining > 0.1:
+            self._schedule_section_barge_watchdog()
+            return
+
+        self._barge_in_active = True
+        self._discard_inflight_user_turn = self._user_turn_started_at is not None
+        self._cancel_pending_silence()
+        try:
+            self.session.input.set_audio_enabled(False)
+            async with self._turn_lock:
+                remaining = self.bridge.seconds_until_section_barge_in()
+                if remaining is None or remaining > 0.1:
+                    return
+                reply_text = await self.bridge.submit_section_time_barge_in(
+                    partial_candidate_text=self._live_user_transcript,
+                )
+                self._clear_live_user_transcript()
+                is_closing_reply = self._mark_closed_from_state()
+
+            if not reply_text:
+                return
+
+            await self._say_text(
+                reply_text,
+                allow_interruptions=False,
+                add_to_chat_ctx=True,
+            )
+            if is_closing_reply:
+                await self._finalize_after_closing()
+        except Exception:
+            logger.exception(
+                "Section time barge-in failed",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+        finally:
+            self._barge_in_active = False
+            if not self._interview_closed:
+                self.session.input.set_audio_enabled(True)
+                self._schedule_section_barge_watchdog()
 
     async def llm_node(
         self,
@@ -367,11 +586,13 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             if not reply_text:
                 return
 
+            if is_closing_reply:
+                # Disable microphone ingestion before the first closing audio
+                # frame so the final statement cannot be interrupted.
+                self.session.input.set_audio_enabled(False)
+
             for chunk in chunk_for_tts(reply_text):
                 yield chunk
-
-            if is_closing_reply:
-                self._shutdown_after_closing()
         finally:
             self._awaiting_agent_reply = False
 
@@ -423,8 +644,8 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             ),
             endpointing={
                 "mode": "dynamic",
-                "min_delay": 1.0,
-                "max_delay": 3.0,
+                "min_delay": 0.8,
+                "max_delay": 2.5,
             },
             interruption={
                 "enabled": True,
@@ -468,6 +689,10 @@ async def interview_agent(ctx: agents.JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev: agents.UserInputTranscribedEvent) -> None:
+        agent.track_user_transcription(
+            ev.transcript or "",
+            is_final=bool(ev.is_final),
+        )
         logger.info(
             "LiveKit user input transcribed",
             extra={

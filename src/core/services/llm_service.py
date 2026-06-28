@@ -1,16 +1,7 @@
-"""
-LLM Service â€” Centralised Groq client for all interview graph nodes.
+"""Pooled Groq clients for latency-sensitive, in-interview LLM calls.
 
-Provides a singleton AsyncGroq client (reused across the entire application
-lifecycle) and typed helper methods for each LLM task:
-  - classify()     â†’ fast 8B model, low tokens
-  - live_evaluate() â†’ fast 8B model, live answer strength JSON
-  - evaluate()     â†’ 70B model, final holistic JSON
-  - generate()     â†’ fast 8B model, question generation
-  - lightweight()  â†’ fast 8B model, short free-form completions
-
-Reusing a single client avoids per-call HTTP connection-pool creation,
-saving ~100-300ms per graph turn.
+Final holistic evaluation is isolated in ``evaluation_llm_client`` and uses
+NVIDIA NIM instead of this module.
 """
 
 from __future__ import annotations
@@ -28,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 _client: AsyncGroq | None = None
 _fallback_client: AsyncGroq | None = None
-_eval_client: AsyncGroq | None = None
-_eval_fallback_client: AsyncGroq | None = None
+_question_client: AsyncGroq | None = None
+_question_fallback_client: AsyncGroq | None = None
+_evaluation_client: AsyncGroq | None = None
+_evaluation_fallback_client: AsyncGroq | None = None
 
 
 def _clean_api_key(value: str | None) -> str:
@@ -37,23 +30,19 @@ def _clean_api_key(value: str | None) -> str:
 
 
 def _select_api_key(*, use_fallback: bool, purpose: str) -> str:
-    primary = _clean_api_key(settings.GROQ_API_KEY)
-    fallback = _clean_api_key(settings.FALLBACK_GROQ_API_KEY)
-    holistic = _clean_api_key(settings.GROQ_HOLISTIC_EVALUATION_KEY)
-
-    if purpose == "evaluation":
-        key = (
-            (fallback or primary or holistic)
-            if use_fallback
-            else (holistic or primary or fallback)
-        )
+    if purpose == "evaluation" and settings.GROQ_EVALUATION_API_KEY:
+        primary = _clean_api_key(settings.GROQ_EVALUATION_API_KEY)
+    elif purpose == "question" and settings.GROQ_QUESTION_API_KEY:
+        primary = _clean_api_key(settings.GROQ_QUESTION_API_KEY)
     else:
-        key = (fallback or primary) if use_fallback else (primary or fallback)
+        primary = _clean_api_key(settings.GROQ_API_KEY)
+
+    fallback = _clean_api_key(settings.FALLBACK_GROQ_API_KEY)
+    key = (fallback or primary) if use_fallback else (primary or fallback)
 
     if not key:
         raise RuntimeError(
-            f"Groq {purpose} call requires GROQ_API_KEY, "
-            "FALLBACK_GROQ_API_KEY, or GROQ_HOLISTIC_EVALUATION_KEY"
+            f"Groq {purpose} call requires GROQ_API_KEY, or FALLBACK_GROQ_API_KEY"
         )
     return key
 
@@ -75,24 +64,40 @@ def _get_client(use_fallback: bool = False) -> AsyncGroq:
 # Typed helpers
 
 
-def _get_eval_client(use_fallback: bool = False) -> AsyncGroq:
-    """Return a Groq client with a longer timeout for final evaluations."""
-    global _eval_client, _eval_fallback_client
+def _get_question_client(use_fallback: bool = False) -> AsyncGroq:
+    """Return a pooled Groq client with the question-generation timeout."""
+
+    global _question_client, _question_fallback_client
+    api_key = _select_api_key(use_fallback=use_fallback, purpose="question")
+    if use_fallback:
+        if _question_fallback_client is None:
+            _question_fallback_client = AsyncGroq(
+                api_key=api_key,
+                timeout=settings.GROQ_QUESTION_TIMEOUT_SECS,
+            )
+        return _question_fallback_client
+
+    if _question_client is None:
+        _question_client = AsyncGroq(
+            api_key=api_key,
+            timeout=settings.GROQ_QUESTION_TIMEOUT_SECS,
+        )
+    return _question_client
+
+
+def _get_evaluation_client(use_fallback: bool = False) -> AsyncGroq:
+    """Return a pooled Groq client for live evaluation."""
+
+    global _evaluation_client, _evaluation_fallback_client
     api_key = _select_api_key(use_fallback=use_fallback, purpose="evaluation")
     if use_fallback:
-        if _eval_fallback_client is None:
-            _eval_fallback_client = AsyncGroq(
-                api_key=api_key,
-                timeout=settings.GROQ_EVAL_TIMEOUT_SECS,
-            )
-        return _eval_fallback_client
+        if _evaluation_fallback_client is None:
+            _evaluation_fallback_client = AsyncGroq(api_key=api_key, timeout=10.0)
+        return _evaluation_fallback_client
 
-    if _eval_client is None:
-        _eval_client = AsyncGroq(
-            api_key=api_key,
-            timeout=settings.GROQ_EVAL_TIMEOUT_SECS,
-        )
-    return _eval_client
+    if _evaluation_client is None:
+        _evaluation_client = AsyncGroq(api_key=api_key, timeout=10.0)
+    return _evaluation_client
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
@@ -105,6 +110,7 @@ async def classify(messages: list[dict]) -> str:
             messages=messages,  # type: ignore[arg-type]
             max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
             temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
+            response_format={"type": "json_object"},
         )
     except Exception as e:
         logger.warning(
@@ -117,33 +123,6 @@ async def classify(messages: list[dict]) -> str:
             messages=messages,  # type: ignore[arg-type]
             max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
             temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
-        )
-    return completion.choices[0].message.content or ""
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-async def evaluate(messages: list[dict]) -> str:
-    """Call the evaluation model (70B) with JSON output. Returns raw JSON string."""
-    try:
-        client = _get_eval_client(use_fallback=False)
-        completion = await client.chat.completions.create(
-            model=settings.GROQ_EVAL_MODEL,
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=settings.GROQ_EVAL_MAX_TOKENS,
-            temperature=settings.GROQ_EVAL_TEMPERATURE,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        logger.warning(
-            "Groq evaluate failed with primary API key: %s. Retrying with fallback...",
-            e,
-        )
-        client = _get_eval_client(use_fallback=True)
-        completion = await client.chat.completions.create(
-            model=settings.GROQ_EVAL_MODEL,
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=settings.GROQ_EVAL_MAX_TOKENS,
-            temperature=settings.GROQ_EVAL_TEMPERATURE,
             response_format={"type": "json_object"},
         )
     return completion.choices[0].message.content or ""
@@ -153,7 +132,7 @@ async def evaluate(messages: list[dict]) -> str:
 async def live_evaluate(messages: list[dict]) -> str:
     """Call the fast live technical evaluation model with JSON output."""
     try:
-        client = _get_client(use_fallback=False)
+        client = _get_evaluation_client(use_fallback=False)
         completion = await client.chat.completions.create(
             model=settings.GROQ_LIVE_EVAL_MODEL,
             messages=messages,  # type: ignore[arg-type]
@@ -166,7 +145,7 @@ async def live_evaluate(messages: list[dict]) -> str:
             "Groq live_evaluate failed with primary API key: %s. Retrying with fallback...",
             e,
         )
-        client = _get_client(use_fallback=True)
+        client = _get_evaluation_client(use_fallback=True)
         completion = await client.chat.completions.create(
             model=settings.GROQ_LIVE_EVAL_MODEL,
             messages=messages,  # type: ignore[arg-type]
@@ -181,12 +160,12 @@ async def live_evaluate(messages: list[dict]) -> str:
 async def generate(messages: list[dict]) -> str:
     """Call the question generation model with JSON output. Returns raw JSON string."""
     try:
-        client = _get_client(use_fallback=False)
+        client = _get_question_client(use_fallback=False)
         completion = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+            model=settings.GROQ_QUESTION_MODEL,
             messages=messages,  # type: ignore[arg-type]
-            max_tokens=settings.GROQ_MAX_TOKENS,
-            temperature=settings.GROQ_TEMPERATURE,
+            max_tokens=settings.GROQ_QUESTION_MAX_TOKENS,
+            temperature=settings.GROQ_QUESTION_TEMPERATURE,
             response_format={"type": "json_object"},
         )
     except Exception as e:
@@ -194,12 +173,12 @@ async def generate(messages: list[dict]) -> str:
             "Groq generate failed with primary API key: %s. Retrying with fallback...",
             e,
         )
-        client = _get_client(use_fallback=True)
+        client = _get_question_client(use_fallback=True)
         completion = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+            model=settings.GROQ_QUESTION_MODEL,
             messages=messages,  # type: ignore[arg-type]
-            max_tokens=settings.GROQ_MAX_TOKENS,
-            temperature=settings.GROQ_TEMPERATURE,
+            max_tokens=settings.GROQ_QUESTION_MAX_TOKENS,
+            temperature=settings.GROQ_QUESTION_TEMPERATURE,
             response_format={"type": "json_object"},
         )
     return completion.choices[0].message.content or ""

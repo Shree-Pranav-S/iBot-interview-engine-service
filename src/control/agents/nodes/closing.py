@@ -1,51 +1,43 @@
-"""Closing node for the interview graph."""
+"""Static, uninterruptible interview closing generation."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from src.control.agents.nodes.context_utils import _next_bot_turn_number
+from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.state import InterviewState
-from src.utils.interview_graph import deterministic_turn_id, utc_now_iso
-
-
-def _closing_text(state: InterviewState) -> str:
-    reason = state.get("closing_reason")
-    if reason == "total_overrun" or state.get("force_close_due_to_overrun"):
-        return "I have enough information from this interview. Thank you for completing it; the next step will be handled after this session."
-    return "Thank you for completing the interview. I have captured your responses, and the next step will be handled after this session."
+from src.control.agents.templates import choose_template
 
 
 def generate_closing_message(state: InterviewState) -> dict[str, Any]:
-    if state.get("closing_done"):
-        return {
-            "pending_bot_turn": None,
-            "should_close": True,
-            "next_action": "complete",
-            "next_node": "final_evaluation",
-        }
+    """Create one of ten stable closing messages for LiveKit playout."""
 
-    session_id = str(state["interview_session_id"])
-    turn_number = _next_bot_turn_number(state)
-    text = _closing_text(state)
-    turn = {
-        "turn_id": deterministic_turn_id(session_id, turn_number, "bot"),
-        "turn_number": turn_number,
-        "speaker": "bot",
-        "tone": "professional",
-        "text": text,
-        "section": state.get("current_section") or "closing",
-        "skill": state.get("current_skill"),
-        "difficulty": state.get("current_difficulty") or "medium",
-        "question_id": state.get("current_question_id"),
-        "timestamp": utc_now_iso(),
-        "metadata": {"message_type": "closing"},
-    }
-    return {
-        "pending_bot_turn": turn,
-        "last_bot_text": text,
+    text = choose_template(
+        "closing",
+        company_name=state.get("company_name") or "the company",
+    )
+    closing_state: InterviewState = {
+        **state,
+        "bot_reply_text": text,
         "bot_reply_type": "closing",
+        "current_question_difficulty": None,
         "should_close": True,
         "closing_done": True,
-        "next_action": "complete",
+        "session_status": "CLOSING",
+    }
+    pending_bot_turn = build_bot_turn(
+        closing_state,
+        text=text,
+        question_type="closing",
+    )
+    return {
+        "bot_reply_text": text,
+        "bot_reply_type": "closing",
+        "pending_bot_turn": pending_bot_turn,
+        "should_close": True,
+        "closing_done": True,
+        "session_status": "CLOSING",
+        "holistic_evaluation_status": "PENDING",
+        "next_action": "end",
+        "phase_complete": True,
     }

@@ -1,143 +1,142 @@
-"""Common persistence node for interview turns and violations."""
+"""Non-blocking transcript and violation persistence nodes."""
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 from typing import Any
 
 from src.control.agents.state import InterviewState
 from src.data.repositories import interview_session_repository
-from src.utils.interview_graph import append_recent_turn
 
 logger = logging.getLogger(__name__)
+_background_persistence_tasks: set[asyncio.Task[None]] = set()
+_background_task_sessions: dict[asyncio.Task[None], str] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
 
 
-AWAITING_BOT_MESSAGE_TYPES = {
-    "question",
-    "clarification",
-    "nudge",
-    "rephrase",
-    "redirect",
-    "think_offer",
-    "think_wait",
-}
+async def persist_turn(
+    *,
+    session_id: str,
+    transcript_items: list[dict[str, Any]],
+    violations: list[dict[str, Any]],
+) -> None:
+    """Persist an immutable snapshot; repository writes are idempotent."""
+
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        for item in transcript_items:
+            await interview_session_repository.append_transcript_turn(
+                session_id,
+                item,
+            )
+        for violation in violations:
+            await interview_session_repository.append_violation(
+                session_id,
+                violation,
+            )
 
 
-def _elapsed_secs(state: InterviewState) -> int:
-    return max(0, int(state.get("elapsed_secs") or 0))
+async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        await interview_session_repository.update_elapsed_time(
+            session_id,
+            elapsed_secs=elapsed_secs,
+            total_pause_secs=0,
+        )
 
 
-def _next_node_for_bot_turn(message_type: str) -> str:
-    if message_type in AWAITING_BOT_MESSAGE_TYPES:
-        return "await_candidate_response_interrupt"
-    if message_type == "closing":
-        return "final_evaluation"
-    return "check_time_budget"
+def _task_finished(task: asyncio.Task[None]) -> None:
+    _background_persistence_tasks.discard(task)
+    _background_task_sessions.pop(task, None)
+    if task.cancelled():
+        logger.warning("Background interview-turn persistence was cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error(
+            "Background interview-turn persistence failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
 
-async def _persist_transcript_turn(
+def _schedule(
     state: InterviewState,
-    turn: dict[str, Any],
-) -> bool:
-    appended = await interview_session_repository.append_transcript_turn(
-        str(state["interview_session_id"]),
-        turn,
-        total_elapsed_secs=_elapsed_secs(state),
+    *,
+    transcript_items: list[dict[str, Any]],
+    violations: list[dict[str, Any]] | None = None,
+) -> None:
+    if not transcript_items and not violations:
+        return
+    task = asyncio.create_task(
+        persist_turn(
+            session_id=str(state["interview_session_id"]),
+            transcript_items=copy.deepcopy(transcript_items),
+            violations=copy.deepcopy(violations or []),
+        )
     )
-    logger.info(
-        "persisted interview transcript turn",
-        extra={
-            "candidate_assessment_id": state.get("candidate_assessment_id"),
-            "turn_id": turn.get("turn_id"),
-            "speaker": turn.get("speaker"),
-            "appended": appended,
-        },
-    )
-    return appended
+    _background_persistence_tasks.add(task)
+    _background_task_sessions[task] = str(state["interview_session_id"])
+    task.add_done_callback(_task_finished)
 
 
-async def _append_violation(
+def schedule_elapsed_persistence(
     state: InterviewState,
-    violation: dict[str, Any],
-) -> bool:
-    appended = await interview_session_repository.append_violation(
-        str(state["interview_session_id"]),
-        violation,
+    *,
+    elapsed_secs: int,
+) -> None:
+    """Persist timing off the graph response path."""
+
+    task = asyncio.create_task(
+        _persist_elapsed(
+            str(state["interview_session_id"]),
+            max(0, int(elapsed_secs)),
+        )
     )
-    logger.info(
-        "persisted interview violation",
-        extra={
-            "candidate_assessment_id": state.get("candidate_assessment_id"),
-            "violation_id": violation.get("violation_id"),
-            "violation_type": violation.get("violation_type"),
-            "appended": appended,
-        },
+    _background_persistence_tasks.add(task)
+    _background_task_sessions[task] = str(state["interview_session_id"])
+    task.add_done_callback(_task_finished)
+
+
+async def persist_bot_output(state: InterviewState) -> dict[str, Any]:
+    """Queue the latest bot utterance from LangGraph's active event loop."""
+
+    pending = state.get("pending_bot_turn")
+    if pending:
+        _schedule(state, transcript_items=[pending])
+    return {"pending_bot_turn": None}
+
+
+async def persist_candidate_output(
+    state: InterviewState,
+) -> dict[str, Any]:
+    """Queue candidate speech and violations from the active event loop."""
+
+    pending = state.get("pending_candidate_turn")
+    violations = list(state.get("violations_to_persist") or [])
+    _schedule(
+        state,
+        transcript_items=[pending] if pending else [],
+        violations=violations,
     )
-    return appended
-
-
-async def persist_interview_turn(state: InterviewState) -> dict[str, Any]:
-    """Persist pending candidate, bot, and violation artifacts in one node."""
-
-    recent_turns = list(state.get("recent_turns") or [])
-    turn_number = int(state.get("turn_number") or 0)
-    updates: dict[str, Any] = {
+    return {
         "pending_candidate_turn": None,
-        "pending_bot_turn": None,
-        "violation_to_persist": None,
+        "violations_to_persist": [],
+        "turn_number": int(state.get("turn_number") or 1) + 1,
     }
 
-    candidate_turn = state.get("pending_candidate_turn")
-    if candidate_turn:
-        await _persist_transcript_turn(state, candidate_turn)
-        recent_turns = append_recent_turn(recent_turns, candidate_turn)
-        turn_number = max(turn_number, int(candidate_turn.get("turn_number") or 0))
-        updates.update(
-            {
-                "last_candidate_event": state.get("normalized_candidate_event"),
-                "last_response_type": state.get("last_response_type")
-                or (state.get("normalized_candidate_event") or {}).get("response_type"),
-            }
-        )
 
-    bot_turn = state.get("pending_bot_turn")
-    bot_message_type = ""
-    if bot_turn:
-        await _persist_transcript_turn(state, bot_turn)
-        recent_turns = append_recent_turn(recent_turns, bot_turn)
-        turn_number = max(turn_number, int(bot_turn.get("turn_number") or 0))
+async def drain_background_persistence(
+    session_id: str | None = None,
+) -> None:
+    """Flush scheduled writes during graceful service shutdown."""
 
-        metadata = (
-            bot_turn.get("metadata", {})
-            if isinstance(bot_turn.get("metadata"), dict)
-            else {}
-        )
-        bot_message_type = str(metadata.get("message_type") or "bot")
-        previous_reply = str(state.get("bot_reply_text") or "").strip()
-        text = str(bot_turn.get("text") or "").strip()
-        updates.update(
-            {
-                "last_bot_text": text or state.get("last_bot_text"),
-                "bot_reply_text": " ".join(
-                    item for item in [previous_reply, text] if item
-                ).strip(),
-                "bot_reply_type": bot_message_type,
-            }
-        )
-
-    violation = state.get("violation_to_persist")
-    if violation:
-        await _append_violation(state, violation)
-
-    next_node = state.get("next_node")
-    if bot_message_type:
-        next_node = _next_node_for_bot_turn(bot_message_type)
-
-    updates.update(
-        {
-            "recent_turns": recent_turns[-8:],
-            "turn_number": turn_number,
-            "next_node": next_node,
-        }
-    )
-    return updates
+    tasks = [
+        task
+        for task in _background_persistence_tasks
+        if session_id is None or _background_task_sessions.get(task) == session_id
+    ]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

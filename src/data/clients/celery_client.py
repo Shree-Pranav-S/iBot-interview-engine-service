@@ -31,7 +31,7 @@ celery_app.conf.update(
         Queue("interview.evaluation"),
     ),
     task_routes={
-        "interview.run_holistic_evaluation": {"queue": "interview.evaluation"},
+        "core.process_final_evaluation": {"queue": "interview.evaluation"},
     },
     task_serializer="json",
     task_track_started=True,

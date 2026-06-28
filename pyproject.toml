@@ -28,6 +28,7 @@ dependencies = [
     "psycopg[binary]>=3.1.0,<4.0.0",
     "livekit-agents[deepgram,silero]>=1.6.1,<2.0",
     "livekit-api>=1.0.0",
+    "openai>=2.43.0",
 ]
 
 [dependency-groups]

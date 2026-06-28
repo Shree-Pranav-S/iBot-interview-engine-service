@@ -29,29 +29,42 @@ class Settings(BaseSettings):
         )
     )
 
-    # â”€â”€ Groq (LLM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_API_KEY: str = Field(default="")
     FALLBACK_GROQ_API_KEY: str = Field(default="")
-    GROQ_HOLISTIC_EVALUATION_KEY: str = Field(default="")
+    GROQ_EVALUATION_API_KEY: str = Field(default="")
+    GROQ_QUESTION_API_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.1-8b-instant")
     GROQ_MAX_TOKENS: int = Field(default=400)
     GROQ_TEMPERATURE: float = Field(default=0.3)
 
-    # â”€â”€ Groq Evaluation Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    GROQ_EVAL_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    GROQ_EVAL_MAX_TOKENS: int = Field(default=4096)
-    GROQ_EVAL_TEMPERATURE: float = Field(default=0.1)
-    GROQ_EVAL_TIMEOUT_SECS: float = Field(default=120.0)
+    # Higher-capability model for nuanced, non-repeating interview questions.
+    GROQ_QUESTION_MODEL: str = Field(default="llama-3.1-8b-instant")
+    GROQ_QUESTION_MAX_TOKENS: int = Field(default=384)
+    GROQ_QUESTION_TEMPERATURE: float = Field(default=0.4)
+    GROQ_QUESTION_TIMEOUT_SECS: float = Field(default=15.0)
 
+    # â”€â”€ Groq Evaluation Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Fast live technical answer evaluation.
     GROQ_LIVE_EVAL_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=96)
+    GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=256)
     GROQ_LIVE_EVAL_TEMPERATURE: float = Field(default=0.0)
 
     # â”€â”€ Groq Classification Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=32)
+    GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=256)
     GROQ_CLASSIFY_TEMPERATURE: float = Field(default=0.0)
+
+    # NVIDIA NIM one-shot holistic evaluation.
+    NVIDIA_NIM_API_KEY: str = Field(default="")
+    NVIDIA_NIM_BASE_URL: str = Field(default="https://integrate.api.nvidia.com/v1")
+    NVIDIA_NIM_MODEL: str = Field(default="deepseek-ai/deepseek-v4-pro")
+    # NVIDIA currently accepts none/high/max for DeepSeek V4 Pro. "high"
+    # preserves careful reasoning without the latency of the maximum mode.
+    NVIDIA_NIM_REASONING_EFFORT: str = Field(default="high")
+    NVIDIA_NIM_TEMPERATURE: float = Field(default=0.2)
+    NVIDIA_NIM_MAX_TOKENS: int = Field(default=8192)
+    NVIDIA_NIM_TIMEOUT_SECS: float = Field(default=600.0)
+    NVIDIA_NIM_STREAM: bool = Field(default=True)
 
     # â”€â”€ Livekit (Real-time Communication) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

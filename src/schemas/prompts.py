@@ -1,119 +1,161 @@
-"""Pydantic schemas for LLM responses used by interview prompts."""
+"""Strict Pydantic contracts for interview-workflow LLM calls."""
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Difficulty = Literal["easy", "medium", "hard"]
-ResponseType = Literal[
-    "answer",
-    "clarification_question",
-    "irrelevant_answer",
-    "silence",
-]
-CandidateQuestionIntent = Literal[
-    "repeat_question",
-    "rephrase_question",
-    "question_about_question",
-    "skip_question",
-]
-
 
 class StrictPromptModel(BaseModel):
-    """Base model that rejects unexpected LLM response keys."""
+    """Reject coercion and unexpected keys from model-produced JSON."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class CandidateResponseClassification(StrictPromptModel):
-    response_type: ResponseType
-    candidate_question_intent: CandidateQuestionIntent | None = None
-    resume_skill_match: bool = False
-    is_substantial: bool = False
+    """The only accepted output from the response-classification model."""
 
-
-class QuestionGenerationResponse(StrictPromptModel):
-    question_text: str = Field(min_length=12, max_length=500)
-    difficulty: Difficulty
-    expected_signals: list[str] = Field(default_factory=list, max_length=5)
-
-
-class AnswerEvaluationResponse(StrictPromptModel):
-    strength: Literal["weak", "adequate", "strong"]
-
-
-LiveResponseType = Literal["answer", "clarification", "irrelevant"]
-ClarificationType = Literal[
-    "repeat_question",
-    "rephrase_question",
-    "skip_question",
-    "question_doubt",
-    "time_to_think",
-]
-AnswerStrength = Literal["weak", "adequate", "strong"]
-LiveNextAction = Literal[
-    "ask_next_question",
-    "ask_elaboration",
-    "repeat_current_question",
-    "rephrase_current_question",
-    "handle_question_doubt",
-    "skip_current_question",
-    "start_think_timer",
-    "redirect_irrelevant",
-]
-
-
-class LiveInterviewDecision(StrictPromptModel):
-    response_type: LiveResponseType
-    clarification_type: ClarificationType | None = None
-    is_substantial: bool | None = None
-    answer_strength: AnswerStrength | None = None
-    next_action: LiveNextAction
-    interviewer_text: str | None = Field(default=None, max_length=450)
-    next_question_text: str | None = Field(default=None, max_length=350)
-    next_difficulty: Difficulty | None = None
-    expected_signals: list[str] = Field(default_factory=list, max_length=5)
-    reason: str = Field(default="", max_length=300)
+    response_type: Literal["answer", "clarification", "irrelevant"]
+    clarification_type: (
+        Literal[
+            "repeat_question",
+            "rephrase_question",
+            "skip_question",
+            "question_doubt",
+            "time_to_think",
+        ]
+        | None
+    )
+    is_substantial: bool | None
+    question_doubt_response: str | None = Field(max_length=420)
+    reason: str = Field(min_length=1, max_length=240)
 
     @model_validator(mode="after")
-    def validate_decision(self) -> LiveInterviewDecision:
+    def validate_classification(self) -> CandidateResponseClassification:
         if self.response_type == "answer":
             if self.clarification_type is not None:
-                raise ValueError("clarification_type must be null for answer")
+                raise ValueError("answer requires clarification_type=null")
             if self.is_substantial is None:
-                raise ValueError("is_substantial is required for answer")
-            if self.is_substantial:
-                if self.answer_strength is None:
-                    raise ValueError("answer_strength is required")
-                if self.next_action != "ask_next_question":
-                    raise ValueError("substantial answers must ask_next_question")
-                if not self.next_question_text:
-                    raise ValueError("next_question_text is required")
-            elif self.next_action != "ask_elaboration":
-                raise ValueError("non-substantial answers must ask_elaboration")
+                raise ValueError("answer requires is_substantial")
+            if self.question_doubt_response is not None:
+                raise ValueError("answer requires question_doubt_response=null")
+            return self
 
         if self.response_type == "clarification":
             if self.clarification_type is None:
-                raise ValueError("clarification_type is required")
-            if self.is_substantial is not None or self.answer_strength is not None:
-                raise ValueError("answer fields must be null for clarification")
-            if self.next_action not in {
-                "repeat_current_question",
-                "rephrase_current_question",
-                "handle_question_doubt",
-                "skip_current_question",
-                "start_think_timer",
-            }:
-                raise ValueError("invalid clarification next_action")
+                raise ValueError("clarification requires clarification_type")
+            if self.is_substantial is not None:
+                raise ValueError("clarification requires is_substantial=null")
+            if (
+                self.clarification_type == "question_doubt"
+                and not self.question_doubt_response
+            ):
+                raise ValueError(
+                    "question_doubt requires a concise question_doubt_response"
+                )
+            if (
+                self.clarification_type != "question_doubt"
+                and self.question_doubt_response is not None
+            ):
+                raise ValueError(
+                    "question_doubt_response is only valid for question_doubt"
+                )
+            return self
 
-        if self.response_type == "irrelevant":
-            if self.clarification_type is not None:
-                raise ValueError("clarification_type must be null for irrelevant")
-            if self.is_substantial is not None or self.answer_strength is not None:
-                raise ValueError("answer fields must be null for irrelevant")
-            if self.next_action != "redirect_irrelevant":
-                raise ValueError("irrelevant responses must redirect_irrelevant")
+        if self.clarification_type is not None:
+            raise ValueError("irrelevant requires clarification_type=null")
+        if self.is_substantial is not None:
+            raise ValueError("irrelevant requires is_substantial=null")
+        if self.question_doubt_response is not None:
+            raise ValueError("irrelevant requires question_doubt_response=null")
+        return self
 
+
+class AnswerEvaluationResponse(StrictPromptModel):
+    """The only accepted output from the live answer-evaluation model."""
+
+    strength: Literal["weak", "adequate", "strong"]
+    reason: str = Field(min_length=1, max_length=280)
+
+
+FORBIDDEN_INTERVIEWER_FEEDBACK = (
+    "good answer",
+    "correct",
+    "that's perfect",
+    "that is perfect",
+    "exactly right",
+    "great job",
+    "well done",
+)
+
+
+def _spoken_word_count(value: str) -> int:
+    return len(re.findall(r"\b[\w+#./'-]+\b", value))
+
+
+class QuestionRephraseResponse(StrictPromptModel):
+    """A genuinely rewritten version of the active interview question."""
+
+    question_text: str = Field(min_length=12, max_length=240)
+
+    @model_validator(mode="after")
+    def validate_rephrased_question(self) -> QuestionRephraseResponse:
+        if "?" not in self.question_text:
+            raise ValueError("question_text must contain at least one question")
+        if _spoken_word_count(self.question_text) > 60:
+            raise ValueError("rephrased question must be at most 60 words")
+        return self
+
+
+class TechnicalQuestionGenerationResponse(StrictPromptModel):
+    """Strict output for a technical acknowledgement and next question."""
+
+    acknowledgement: str = Field(min_length=1, max_length=160)
+    question_text: str = Field(min_length=12, max_length=240)
+    difficulty: Literal["easy", "medium", "hard"]
+    probe_deeper: bool
+    topic: str = Field(min_length=2, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_technical_question(
+        self,
+    ) -> TechnicalQuestionGenerationResponse:
+        acknowledgement = self.acknowledgement.casefold()
+        if any(phrase in acknowledgement for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
+            raise ValueError("interviewer response contains evaluative feedback")
+        if "?" in self.acknowledgement:
+            raise ValueError("acknowledgement must not contain a question")
+        if "?" not in self.question_text:
+            raise ValueError("question_text must contain at least one question")
+        if _spoken_word_count(self.acknowledgement) > 40:
+            raise ValueError("acknowledgement must be at most 40 words")
+        if _spoken_word_count(self.question_text) > 60:
+            raise ValueError("question_text must be at most 60 words")
+        return self
+
+
+class BehaviouralQuestionGenerationResponse(StrictPromptModel):
+    """Strict output for the simpler behavioural/cultural generator."""
+
+    acknowledgement: str = Field(min_length=1, max_length=160)
+    question_text: str = Field(min_length=12, max_length=240)
+    signal_focus: str = Field(min_length=2, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_behavioural_question(
+        self,
+    ) -> BehaviouralQuestionGenerationResponse:
+        acknowledgement = self.acknowledgement.casefold()
+        if any(phrase in acknowledgement for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
+            raise ValueError("interviewer response contains evaluative feedback")
+        if "?" in self.acknowledgement:
+            raise ValueError("acknowledgement must not contain a question")
+        if "?" not in self.question_text:
+            raise ValueError("question_text must contain at least one question")
+        if _spoken_word_count(self.acknowledgement) > 40:
+            raise ValueError("acknowledgement must be at most 40 words")
+        if _spoken_word_count(self.question_text) > 60:
+            raise ValueError("question_text must be at most 60 words")
         return self

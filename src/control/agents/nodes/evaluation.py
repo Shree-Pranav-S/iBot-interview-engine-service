@@ -1,103 +1,103 @@
-"""Fast live technical evaluation node."""
+"""Simple weak/adequate/strong live evaluation for substantial answers."""
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
-from src.control.agents.nodes.llm_helpers import (
-    compact_json,
-    live_evaluate_json,
-    model_to_dict,
-)
-from src.control.agents.prompts import EVALUATION_SYSTEM_PROMPT
+from src.control.agents.nodes.llm_helpers import evaluate_with_schema
+from src.control.agents.prompts import LIVE_EVALUATION_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
 from src.schemas.prompts import AnswerEvaluationResponse
 from src.utils.interview_graph import utc_now_iso
 
-STRENGTH_SCORE = {"weak": 2.0, "adequate": 3.4, "strong": 4.6}
-
-
-def _candidate_turn_number(state: InterviewState) -> int:
-    pending_candidate = state.get("pending_candidate_turn")
-    if pending_candidate:
-        return int(pending_candidate.get("turn_number") or 0)
-    return int(state.get("turn_number") or 0)
-
-
-def _skill_key(state: InterviewState) -> str:
-    return str(state.get("current_skill") or state.get("current_section") or "").lower()
-
-
-def _prior_consecutive_adequate(state: InterviewState) -> int:
-    progress = dict((state.get("skill_progress") or {}).get(_skill_key(state)) or {})
-    return int(progress.get("consecutive_adequate_answers") or 0)
-
-
-def _recommended_difficulty(state: InterviewState, strength: str) -> str:
-    if strength == "weak":
-        return "easy"
-    if strength == "strong":
-        return "hard"
-    return "hard" if _prior_consecutive_adequate(state) >= 1 else "medium"
+logger = logging.getLogger(__name__)
 
 
 def _evaluation_messages(state: InterviewState) -> list[dict[str, str]]:
-    event = state.get("normalized_candidate_event") or {}
     context = {
-        "question": state.get("current_question_text"),
-        "candidate_answer": event.get("text") or "",
-        "section": state.get("current_section"),
-        "skill": state.get("current_skill"),
-        "difficulty": state.get("current_difficulty"),
+        "previous_candidate_response": state.get("previous_candidate_response") or "",
+        "previous_question": state.get("current_question_text") or "",
+        "current_technical_skill": state.get("current_technical_skill"),
+        "expected_signals": list(state.get("current_expected_signals") or []),
+        "question_difficulty": state.get("current_question_difficulty"),
+        "resume_context": state.get("resume_context")
+        or {
+            "skills": [],
+            "experience_years": 0,
+        },
+        "schema": AnswerEvaluationResponse.model_json_schema(),
     }
     return [
-        {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
+        {"role": "system", "content": LIVE_EVALUATION_SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": (
-                "Return JSON matching this schema: "
-                f"{compact_json(AnswerEvaluationResponse.model_json_schema(), max_chars=1200)}. "
-                f"Context: {compact_json(context, max_chars=2600)}"
-            ),
+            "content": json.dumps(context, ensure_ascii=False, default=str),
         },
     ]
 
 
-async def live_evaluate_answer_node(state: InterviewState) -> dict[str, Any]:
-    generated = model_to_dict(
-        await live_evaluate_json(
+async def evaluate_substantial_answer(state: InterviewState) -> dict[str, Any]:
+    """Evaluate one answer and retain only the phase-one live result."""
+
+    source = "llm"
+    try:
+        result = await evaluate_with_schema(
             _evaluation_messages(state),
             AnswerEvaluationResponse,
         )
-    )
-    strength = str(generated["strength"]).lower()
-    if strength not in STRENGTH_SCORE:
-        raise ValueError(f"Invalid answer strength from evaluator: {strength}")
+    except Exception:
+        logger.exception(
+            "Strict live answer evaluation failed",
+            extra={
+                "candidate_assessment_id": state.get("candidate_assessment_id"),
+                "question_id": state.get("current_question_id"),
+            },
+        )
+        # A neutral valid result is safer than inventing a negative assessment.
+        result = AnswerEvaluationResponse(
+            strength="adequate",
+            reason="Neutral fallback because the live evaluation service failed.",
+        )
+        source = "validated_fallback"
 
-    recommended_difficulty = _recommended_difficulty(state, strength)
-    evaluation = {
-        "evaluation_id": (
-            f"{state.get('current_question_id')}:{_candidate_turn_number(state)}"
-        ),
-        "question_id": state.get("current_question_id"),
-        "skill": state.get("current_skill"),
-        "section": state.get("current_section"),
-        "response_type": "answer",
-        "provisional_score": STRENGTH_SCORE[strength],
-        "strength": strength,
-        "is_substantial": True,
-        "signals_observed": [f"{strength}_technical_signal"],
-        "signals_missing": [] if strength == "strong" else ["depth_or_specificity"],
-        "recommended_next_action": "next_question",
-        "recommended_difficulty": recommended_difficulty,
-        "summary": f"Live evaluation classified the answer as {strength}.",
-        "created_at": utc_now_iso(),
-        "violations": [],
+    evaluated_at = utc_now_iso()
+    skill_streaks = {
+        key: dict(value)
+        for key, value in (state.get("skill_evaluation_streaks") or {}).items()
     }
+    if state.get("current_section_kind") == "technical" and state.get(
+        "current_technical_skill"
+    ):
+        skill_key = str(state["current_technical_skill"]).casefold()
+        current = dict(
+            skill_streaks.get(skill_key) or {"weak": 0, "adequate": 0, "strong": 0}
+        )
+        for strength in ("weak", "adequate", "strong"):
+            current[strength] = (
+                int(current.get(strength) or 0) + 1
+                if strength == result.strength
+                else 0
+            )
+        skill_streaks[skill_key] = current
+
+    pending_candidate_turn = dict(state.get("pending_candidate_turn") or {})
+    metadata = dict(pending_candidate_turn.get("metadata") or {})
+    metadata.update(
+        {
+            "live_evaluation": result.model_dump(),
+            "evaluation_source": source,
+            "evaluated_at": evaluated_at,
+        }
+    )
+    pending_candidate_turn["metadata"] = metadata
     return {
-        "latest_evaluation": evaluation,
-        "live_evaluations": [*(state.get("live_evaluations") or []), evaluation],
-        "current_difficulty": recommended_difficulty,
-        "violation_to_persist": None,
-        "next_node": None,
+        "latest_evaluation": result.model_dump(),
+        "evaluation_source": source,
+        "last_evaluated_at": evaluated_at,
+        "last_answer_strength": result.strength,
+        "skill_evaluation_streaks": skill_streaks,
+        "pending_candidate_turn": pending_candidate_turn,
+        "next_action": "check_time",
     }

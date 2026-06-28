@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -29,6 +30,7 @@ async def load_interview_context(
                     ca.candidate_id,
                     ca.assessment_id,
                     ca.status AS candidate_assessment_status,
+                    ca.interview_started_at,
                     ca.resume_parsed,
                     c.full_name AS candidate_name,
                     c.email AS candidate_email,
@@ -74,12 +76,12 @@ async def mark_candidate_started(candidate_assessment_id: str | uuid.UUID) -> No
 
 async def mark_candidate_timer_started(
     candidate_assessment_id: str | uuid.UUID,
-) -> None:
+) -> datetime:
     """Record the first bot playout as the interview's official start."""
 
     session_factory = await get_session_factory()
     async with session_factory() as session:
-        await session.execute(
+        result = await session.execute(
             text(
                 """
                 UPDATE candidate_assessments
@@ -87,11 +89,14 @@ async def mark_candidate_timer_started(
                     interview_started_at = COALESCE(interview_started_at, NOW()),
                     updated_at = NOW()
                 WHERE id = :candidate_assessment_id
+                RETURNING interview_started_at
                 """
             ),
             {"candidate_assessment_id": _uuid(candidate_assessment_id)},
         )
+        started_at = result.scalar_one()
         await session.commit()
+        return started_at
 
 
 async def mark_candidate_completed(candidate_assessment_id: str | uuid.UUID) -> None:
