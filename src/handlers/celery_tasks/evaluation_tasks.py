@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from typing import Any
 
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -13,10 +15,12 @@ from src.core.services.evaluation_errors import (
     TransientEvaluationError,
 )
 from src.core.services.evaluation_service import run_holistic_evaluation
+from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app
 from src.data.repositories.evaluation_repository import (
     mark_evaluation_failed,
 )
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
 
 logger = logging.getLogger(__name__)
 RETRYABLE_SQL_STATES = {"40001", "40P01"}
@@ -65,10 +69,60 @@ def process_final_evaluation_task(
 ) -> dict[str, Any]:
     """Evaluate one finalized session with bounded transient retries."""
 
+    task_id = str(self.request.id or candidate_assessment_id)
+    started_at = time.monotonic()
+    _run_async(
+        try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.CELERY_TASK_STARTED,
+                source_service=EventSource.INTERVIEW_ENGINE,
+                correlation_id=task_id,
+                candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                metadata={
+                    "task_name": self.name,
+                    "retry_number": self.request.retries,
+                },
+            )
+        )
+    )
     try:
-        return _run_async(run_holistic_evaluation(candidate_assessment_id))
-    except PermanentEvaluationError:
+        result = _run_async(run_holistic_evaluation(candidate_assessment_id))
+        _run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_COMPLETED,
+                    source_service=EventSource.INTERVIEW_ENGINE,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "result_status": result.get("status"),
+                    },
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
+        return result
+    except PermanentEvaluationError as exc:
         _persist_failure(candidate_assessment_id)
+        _run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_FAILED,
+                    source_service=EventSource.INTERVIEW_ENGINE,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "exception_type": type(exc).__name__,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
         logger.exception(
             "Holistic evaluation failed permanently; not retrying",
             extra={
@@ -81,6 +135,23 @@ def process_final_evaluation_task(
             isinstance(exc, TransientEvaluationError) or _retryable_database_error(exc)
         ):
             _persist_failure(candidate_assessment_id)
+            _run_async(
+                try_record_event_in_background(
+                    EventLogCreate(
+                        event_name=EventName.CELERY_TASK_FAILED,
+                        source_service=EventSource.INTERVIEW_ENGINE,
+                        correlation_id=task_id,
+                        candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                        metadata={
+                            "task_name": self.name,
+                            "retry_number": self.request.retries,
+                            "exception_type": type(exc).__name__,
+                        },
+                        error_message=str(exc),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                )
+            )
             logger.exception(
                 "Unexpected non-retryable holistic evaluation failure",
                 extra={
@@ -91,6 +162,23 @@ def process_final_evaluation_task(
 
         if self.request.retries >= int(self.max_retries or 0):
             _persist_failure(candidate_assessment_id)
+            _run_async(
+                try_record_event_in_background(
+                    EventLogCreate(
+                        event_name=EventName.CELERY_TASK_FAILED,
+                        source_service=EventSource.INTERVIEW_ENGINE,
+                        correlation_id=task_id,
+                        candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                        metadata={
+                            "task_name": self.name,
+                            "retry_number": self.request.retries,
+                            "exception_type": type(exc).__name__,
+                        },
+                        error_message=str(exc),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                )
+            )
             logger.exception(
                 "Holistic evaluation exhausted transient retries",
                 extra={
@@ -109,6 +197,24 @@ def process_final_evaluation_task(
             else None
         )
         countdown = max(exponential_delay, provider_delay or 0)
+        _run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_RETRYING,
+                    source_service=EventSource.INTERVIEW_ENGINE,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "retry_in_seconds": countdown,
+                        "exception_type": type(exc).__name__,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
         logger.warning(
             "Retrying transient holistic evaluation failure",
             exc_info=True,

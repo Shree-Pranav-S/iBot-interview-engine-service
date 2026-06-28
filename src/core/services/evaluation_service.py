@@ -19,11 +19,13 @@ from src.core.services.evaluation_llm_client import (
 from src.core.services.evaluation_score_calculator import (
     calculate_final_evaluation,
 )
+from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.repositories.evaluation_repository import (
     evaluation_exists_for_hash,
     load_evaluation_source,
     save_final_evaluation,
 )
+from src.schemas.realtime import RecruiterEventType
 
 logger = logging.getLogger(__name__)
 READY_SESSION_STATUSES = {
@@ -100,7 +102,25 @@ async def run_holistic_evaluation(
         bundle=bundle,
         model_result=model_result,
     )
-    await save_final_evaluation(final_record)
+    notification = await save_final_evaluation(
+        final_record,
+        recruiter_email=str(source.get("recruiter_email") or ""),
+    )
+    await publish_recruiter_event(
+        recruiter_id=str(source["recruiter_id"]),
+        event_type=RecruiterEventType.INTERVIEW_EVALUATED,
+        payload={
+            "candidate_assessment_id": candidate_id,
+            "assessment_id": str(final_record.assessment_id),
+            "candidate_name": str(source.get("candidate_name") or "Candidate"),
+            "assessment_title": str(source.get("assessment_title") or "Assessment"),
+            "overall_score": final_record.overall_score,
+            "hiring_recommendation": final_record.hiring_recommendation,
+            "status": "EVALUATED",
+            "notification_id": str(notification["id"]),
+            "notification_sent_at": notification["sent_at"].isoformat(),
+        },
+    )
     logger.info(
         "Holistic interview evaluation saved",
         extra={

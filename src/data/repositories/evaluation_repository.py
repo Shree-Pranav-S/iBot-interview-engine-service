@@ -40,6 +40,7 @@ async def load_evaluation_source(
                     s.total_pause_secs,
                     ca.assessment_id,
                     ca.status AS candidate_assessment_status,
+                    a.recruiter_id,
                     c.full_name AS candidate_name,
                     c.email AS candidate_email,
                     a.title AS assessment_title,
@@ -47,7 +48,8 @@ async def load_evaluation_source(
                     a.jd_analysis,
                     a.interview_plan,
                     a.interview_duration_mins,
-                    COALESCE(r.company_name, '') AS company_name
+                    COALESCE(r.company_name, '') AS company_name,
+                    COALESCE(r.email, '') AS recruiter_email
                 FROM interview_sessions s
                 JOIN candidate_assessments ca
                     ON ca.id = s.candidate_assessment_id
@@ -111,8 +113,12 @@ async def mark_evaluation_failed(
         )
 
 
-async def save_final_evaluation(record: FinalEvaluationRecord) -> None:
-    """Upsert the report, mark lifecycle state, and refresh assessment ranks."""
+async def save_final_evaluation(
+    record: FinalEvaluationRecord,
+    *,
+    recruiter_email: str,
+) -> dict[str, Any]:
+    """Atomically save the report, lifecycle state, ranks, and dashboard notice."""
 
     params = {
         **record.model_dump(mode="python"),
@@ -276,6 +282,30 @@ async def save_final_evaluation(record: FinalEvaluationRecord) -> None:
             ),
             params,
         )
+        notification_result = await session.execute(
+            text(
+                """
+                    INSERT INTO notification_logs (
+                        candidate_assessment_id,
+                        notification_type,
+                        recipient_email,
+                        delivery_status
+                    )
+                    VALUES (
+                        :candidate_assessment_id,
+                        'REPORT_READY',
+                        :recruiter_email,
+                        'SENT'
+                    )
+                    RETURNING id, sent_at
+                    """
+            ),
+            {
+                **params,
+                "recruiter_email": recruiter_email,
+            },
+        )
+        notification = notification_result.mappings().one()
 
         # Serialize ranking refreshes within an assessment so concurrent
         # evaluations cannot publish inconsistent ranks or percentiles.
@@ -329,3 +359,4 @@ async def save_final_evaluation(record: FinalEvaluationRecord) -> None:
             ),
             params,
         )
+    return dict(notification)

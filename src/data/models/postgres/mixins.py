@@ -8,7 +8,7 @@ from sqlalchemy.sql import func
 
 
 class TimestampMixin:
-    """Adds server-side created_at and updated_at to a model."""
+    """Adds lifecycle timestamps and nullable soft deletion."""
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
@@ -20,4 +20,8 @@ class TimestampMixin:
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
     )

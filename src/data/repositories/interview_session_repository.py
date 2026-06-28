@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -15,9 +15,10 @@ from src.data.clients.postgres_client import get_session_factory
 SESSION_STATUSES = {
     "INITIALIZING",
     "IN_PROGRESS",
-    "PAUSED",
+    "DISCONNECTED",
     "COMPLETED",
     "EVALUATED",
+    "EVALUATION_FAILED",
     "DEACTIVATED",
     "TERMINATED",
 }
@@ -85,7 +86,10 @@ async def get_session_by_candidate_assessment_id(
     return await _fetch_one(
         """
         SELECT id, candidate_assessment_id, status, transcript, violations,
-               total_elapsed_secs, total_pause_secs, grace_period_expires_at,
+               total_elapsed_secs, total_pause_secs, reconnect_deadline,
+               disconnect_count, timeout_disconnect_count,
+               last_disconnected_at, session_token_expires_at,
+               active_connection_id,
                created_at, last_updated_at
         FROM interview_sessions
         WHERE candidate_assessment_id = :candidate_assessment_id
@@ -100,7 +104,10 @@ async def get_session(session_id: str | uuid.UUID) -> dict[str, Any]:
     return await _fetch_one(
         """
         SELECT id, candidate_assessment_id, status, transcript, violations,
-               total_elapsed_secs, total_pause_secs, grace_period_expires_at,
+               total_elapsed_secs, total_pause_secs, reconnect_deadline,
+               disconnect_count, timeout_disconnect_count,
+               last_disconnected_at, session_token_expires_at,
+               active_connection_id,
                created_at, last_updated_at
         FROM interview_sessions
         WHERE id = :session_id
@@ -135,7 +142,10 @@ async def get_or_create_session(
         ON CONFLICT (candidate_assessment_id) DO UPDATE
         SET last_updated_at = interview_sessions.last_updated_at
         RETURNING id, candidate_assessment_id, status, transcript, violations,
-                  total_elapsed_secs, total_pause_secs, grace_period_expires_at,
+                  total_elapsed_secs, total_pause_secs, reconnect_deadline,
+                  disconnect_count, timeout_disconnect_count,
+                  last_disconnected_at, session_token_expires_at,
+                  active_connection_id,
                   created_at, last_updated_at
         """,
         {"candidate_assessment_id": _uuid(candidate_assessment_id)},
@@ -272,36 +282,12 @@ async def mark_session_in_progress(session_id: str | uuid.UUID) -> None:
         """
         UPDATE interview_sessions
         SET status = 'IN_PROGRESS',
-            grace_period_expires_at = NULL,
+            reconnect_deadline = NULL,
             last_updated_at = NOW()
         WHERE id = :session_id
         """,
         {"session_id": _uuid(session_id)},
     )
-
-
-async def pause_session(
-    session_id: str | uuid.UUID,
-    grace_period_expires_at: datetime | None = None,
-) -> datetime:
-    """Pause a session and return the grace-period expiry timestamp."""
-
-    expires_at = grace_period_expires_at or (_utc_now() + timedelta(minutes=5))
-    await _execute(
-        """
-        UPDATE interview_sessions
-        SET status = 'PAUSED',
-            grace_period_expires_at = :grace_period_expires_at,
-            last_updated_at = NOW()
-        WHERE id = :session_id
-          AND status NOT IN ('COMPLETED', 'EVALUATED', 'DEACTIVATED', 'TERMINATED')
-        """,
-        {
-            "session_id": _uuid(session_id),
-            "grace_period_expires_at": expires_at,
-        },
-    )
-    return expires_at
 
 
 async def complete_session(
@@ -316,7 +302,8 @@ async def complete_session(
         UPDATE interview_sessions
         SET status = 'COMPLETED',
             total_elapsed_secs = :total_elapsed_secs,
-            grace_period_expires_at = NULL,
+            reconnect_deadline = NULL,
+            active_connection_id = NULL,
             last_updated_at = NOW()
         WHERE id = :session_id
         """,
@@ -353,6 +340,8 @@ async def deactivate_session(
         """
         UPDATE interview_sessions
         SET status = 'DEACTIVATED',
+            reconnect_deadline = NULL,
+            active_connection_id = NULL,
             last_updated_at = NOW()
         WHERE id = :session_id
         """,

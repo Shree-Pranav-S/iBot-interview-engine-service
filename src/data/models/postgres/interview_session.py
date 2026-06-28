@@ -75,10 +75,36 @@ class InterviewSession(Base):
         default=0,
     )
 
-    grace_period_expires_at: Mapped[datetime | None] = mapped_column(
+    session_token: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        unique=True,
+    )
+    session_token_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    disconnect_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    timeout_disconnect_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_disconnected_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    reconnect_deadline: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    active_connection_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from collections.abc import AsyncIterable
 from typing import Any
@@ -36,6 +37,23 @@ logger = logging.getLogger("interview-livekit-agent")
 USER_AWAY_TIMEOUT_SECS = 5.0
 THINK_EXTENSION_TIMEOUT_SECS = 15.0
 POST_TURN_SILENCE_GUARD_SECS = 1.25
+DEMO_GREETING = (
+    "Welcome to this demo interview. This is a short practice space to help "
+    "you become comfortable with the interview environment. Please make "
+    "yourself comfortable, and say anything when you are ready."
+)
+DEMO_RESPONSE_TEMPLATES = (
+    "Thank you. Your response came through clearly, and you can continue whenever you are ready.",
+    "Great, I heard you clearly. Feel free to say a little more so you can get used to the experience.",
+    "That came through well. This practice room works just like the live voice interview.",
+    "Thank you for sharing that. Take your time and continue speaking whenever you feel comfortable.",
+    "Perfect, your microphone and the interview connection are working as expected.",
+    "I heard your response clearly. You can keep practicing at your own pace.",
+    "Thanks, that sounded clear. This is a good opportunity to become familiar with the response flow.",
+    "Your response was received successfully. Feel free to try another answer when you are ready.",
+    "Everything is coming through properly. You can continue speaking naturally, just as you would in the interview.",
+    "Thank you. The practice setup is working well, and you may continue whenever you would like.",
+)
 
 
 def prewarm(proc: agents.JobProcess) -> None:
@@ -82,17 +100,113 @@ class LangGraphPipelineLLM(llm.LLM):  # type: ignore[misc]
         raise RuntimeError("LangGraphPipelineLLM is only used with a custom llm_node")
 
 
+class StaticDemoPipelineLLM(llm.LLM):  # type: ignore[misc]
+    """Non-provider placeholder that makes external LLM usage impossible."""
+
+    @property
+    def model(self) -> str:
+        return "static-demo-templates"
+
+    @property
+    def provider(self) -> str:
+        return "internal"
+
+    def chat(
+        self,
+        *,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool] | None = None,
+        conn_options: Any = agents.DEFAULT_API_CONNECT_OPTIONS,
+        parallel_tool_calls: Any = agents.NOT_GIVEN,
+        tool_choice: Any = agents.NOT_GIVEN,
+        extra_kwargs: Any = agents.NOT_GIVEN,
+    ) -> llm.LLMStream:
+        raise RuntimeError(
+            "The demo agent only supports its static custom response node"
+        )
+
+
+class DemoLiveKitAgent(Agent):  # type: ignore[misc]
+    """Disposable practice agent driven only by static response templates."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            instructions="Static no-LLM demo interview agent.",
+            llm=StaticDemoPipelineLLM(),
+        )
+        self._response_pending = False
+        self._last_response_index: int | None = None
+
+    async def _stream_text_chunks(self, text: str) -> AsyncIterable[str]:
+        for chunk in chunk_for_tts(text, max_chars=96):
+            yield chunk
+
+    async def on_enter(self) -> None:
+        """Speak the fixed welcome after the LiveKit speech pipeline is ready."""
+
+        handle = self.session.say(
+            self._stream_text_chunks(DEMO_GREETING),
+            allow_interruptions=True,
+            add_to_chat_ctx=True,
+        )
+        await handle.wait_for_playout()
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: ChatContext,
+        new_message: ChatMessage,
+    ) -> None:
+        """Accept any detected non-empty candidate turn without classifying it."""
+
+        candidate_text = " ".join((new_message.text_content or "").split())
+        if not candidate_text:
+            raise StopResponse()
+        self._response_pending = True
+
+    def _choose_response(self) -> str:
+        available_indices = [
+            index
+            for index in range(len(DEMO_RESPONSE_TEMPLATES))
+            if index != self._last_response_index
+        ]
+        selected_index = random.choice(available_indices)
+        self._last_response_index = selected_index
+        return DEMO_RESPONSE_TEMPLATES[selected_index]
+
+    async def llm_node(
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        model_settings: ModelSettings,
+    ) -> AsyncIterable[str]:
+        """Yield one random static response; no provider client is reachable."""
+
+        if not self._response_pending:
+            return
+        self._response_pending = False
+        for chunk in chunk_for_tts(self._choose_response()):
+            yield chunk
+
+
 class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
     """LiveKit voice agent that delegates interview reasoning to LangGraph."""
 
-    def __init__(self, *, candidate_assessment_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        candidate_assessment_id: str,
+        interview_session_id: str,
+        connection_id: str,
+    ) -> None:
         super().__init__(
             instructions=("placeholder"),
             llm=LangGraphPipelineLLM(),
         )
 
         self.bridge = LiveKitInterviewBridge(
-            candidate_assessment_id=candidate_assessment_id
+            candidate_assessment_id=candidate_assessment_id,
+            interview_session_id=interview_session_id,
+            connection_id=connection_id,
         )
 
         self._pending_user_text: str | None = None
@@ -498,6 +612,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if is_closing_reply:
             await self._finalize_after_closing()
 
+    async def handle_session_close(self, reason: str) -> None:
+        """Persist unexpected room closure without affecting LiveKit teardown."""
+
+        try:
+            await self.bridge.record_disconnect(reason)
+        except Exception:
+            logger.exception(
+                "Failed to record LiveKit session disconnection",
+                extra={
+                    "candidate_assessment_id": (self.bridge.candidate_assessment_id)
+                },
+            )
+
     async def handle_section_time_barge_in(self) -> None:
         """Interrupt an overrun section, including during candidate speech."""
 
@@ -615,9 +742,18 @@ async def interview_agent(ctx: agents.JobContext) -> None:
 
     metadata = json.loads(ctx.job.metadata or "{}")
     candidate_assessment_id = metadata.get("candidate_assessment_id")
+    session_mode = str(metadata.get("session_mode") or "interview").lower()
+    interview_session_id = str(metadata.get("interview_session_id") or "")
+    connection_id = str(metadata.get("connection_id") or "")
 
     if not candidate_assessment_id:
         raise RuntimeError("Missing candidate_assessment_id in LiveKit job metadata")
+    if session_mode not in {"interview", "demo"}:
+        raise RuntimeError(f"Unsupported LiveKit session mode: {session_mode}")
+    if session_mode == "interview" and (not interview_session_id or not connection_id):
+        raise RuntimeError(
+            "Missing interview session connection metadata in LiveKit job"
+        )
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
@@ -661,17 +797,27 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         user_away_timeout=USER_AWAY_TIMEOUT_SECS,
     )
 
-    agent = InterviewLiveKitAgent(candidate_assessment_id=str(candidate_assessment_id))
+    agent: InterviewLiveKitAgent | DemoLiveKitAgent
+    if session_mode == "demo":
+        agent = DemoLiveKitAgent()
+    else:
+        agent = InterviewLiveKitAgent(
+            candidate_assessment_id=str(candidate_assessment_id),
+            interview_session_id=interview_session_id,
+            connection_id=connection_id,
+        )
 
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev: agents.AgentStateChangedEvent) -> None:
         raw_agent_state = getattr(ev.new_state, "value", ev.new_state)
-        agent.track_agent_state(str(raw_agent_state))
+        if isinstance(agent, InterviewLiveKitAgent):
+            agent.track_agent_state(str(raw_agent_state))
 
         logger.info(
             "LiveKit agent state changed",
             extra={
                 "candidate_assessment_id": candidate_assessment_id,
+                "session_mode": session_mode,
                 "old_state": str(getattr(ev.old_state, "value", ev.old_state)),
                 "new_state": str(getattr(ev.new_state, "value", ev.new_state)),
             },
@@ -682,21 +828,25 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         raw_state = getattr(ev.new_state, "value", ev.new_state)
         new_state = str(raw_state)
 
-        agent.track_user_state(new_state)
+        if not isinstance(agent, InterviewLiveKitAgent):
+            return
 
+        agent.track_user_state(new_state)
         if new_state == "away":
             asyncio.create_task(agent.handle_user_away())
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev: agents.UserInputTranscribedEvent) -> None:
-        agent.track_user_transcription(
-            ev.transcript or "",
-            is_final=bool(ev.is_final),
-        )
+        if isinstance(agent, InterviewLiveKitAgent):
+            agent.track_user_transcription(
+                ev.transcript or "",
+                is_final=bool(ev.is_final),
+            )
         logger.info(
             "LiveKit user input transcribed",
             extra={
                 "candidate_assessment_id": candidate_assessment_id,
+                "session_mode": session_mode,
                 "is_final": ev.is_final,
                 "text_length": len(ev.transcript or ""),
             },
@@ -708,23 +858,31 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             "LiveKit AgentSession error",
             extra={
                 "candidate_assessment_id": candidate_assessment_id,
+                "session_mode": session_mode,
                 "error": str(getattr(ev, "error", ev)),
             },
         )
 
     @session.on("close")
     def _on_close(ev: Any) -> None:
+        reason = str(getattr(ev, "reason", ""))
         logger.info(
             "LiveKit AgentSession closed",
             extra={
                 "candidate_assessment_id": candidate_assessment_id,
-                "reason": str(getattr(ev, "reason", "")),
+                "session_mode": session_mode,
+                "reason": reason,
             },
         )
+        if isinstance(agent, InterviewLiveKitAgent):
+            asyncio.create_task(agent.handle_session_close(reason))
 
     logger.info(
         "Connecting LiveKit job with automatic ICE transport selection",
-        extra={"candidate_assessment_id": candidate_assessment_id},
+        extra={
+            "candidate_assessment_id": candidate_assessment_id,
+            "session_mode": session_mode,
+        },
     )
     await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
     await ctx.wait_for_participant()

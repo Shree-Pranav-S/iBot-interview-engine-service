@@ -9,6 +9,12 @@ def candidate_room_name(candidate_assessment_id: str) -> str:
     return f"interview-{candidate_assessment_id}"
 
 
+def demo_room_name(candidate_assessment_id: str, session_id: str) -> str:
+    """Return an isolated room name for one disposable practice session."""
+
+    return f"demo-interview-{candidate_assessment_id}-{session_id}"
+
+
 def candidate_participant_identity(candidate_id: str) -> str:
     """Return the deterministic LiveKit identity for a candidate participant."""
 

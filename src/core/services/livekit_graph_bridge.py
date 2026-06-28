@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
+import uuid
+from datetime import datetime
 from typing import Any, cast
 
 from langgraph.types import Command
@@ -18,10 +19,15 @@ from src.control.agents.nodes.time_manager import (
     section_transition_deadline_elapsed,
 )
 from src.control.agents.state import InterviewState
+from src.core.services.candidate_session_service import CandidateSessionService
+from src.core.services.event_log_service import (
+    try_record_event_in_background,
+)
 from src.data.repositories import (
     assessment_context_repository,
     interview_session_repository,
 )
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.utils.interview_graph import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -31,12 +37,21 @@ TERMINAL_STATUSES = {"COMPLETED", "TERMINATED", "DEACTIVATED", "EVALUATED"}
 class LiveKitInterviewBridge:
     """Resume one checkpointed graph thread from LiveKit-confirmed events."""
 
-    def __init__(self, *, candidate_assessment_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        candidate_assessment_id: str,
+        interview_session_id: str,
+        connection_id: str,
+    ) -> None:
         self.candidate_assessment_id = candidate_assessment_id
+        self.interview_session_id = interview_session_id
+        self.connection_id = connection_id
         self.state: dict[str, Any] | None = None
         self._config = {"configurable": {"thread_id": self.candidate_assessment_id}}
         self._timer_started_monotonic: float | None = None
         self._timer_started_at: datetime | None = None
+        self._elapsed_before_connection_secs = 0
 
     @staticmethod
     def _is_terminal(state: dict[str, Any]) -> bool:
@@ -58,9 +73,17 @@ class LiveKitInterviewBridge:
             context = await assessment_context_repository.load_interview_context(
                 self.candidate_assessment_id
             )
+            session = await interview_session_repository.get_session_by_candidate_assessment_id(
+                self.candidate_assessment_id
+            )
+            self._elapsed_before_connection_secs = max(
+                0,
+                int(session.get("total_elapsed_secs") or 0),
+            )
             started_at = context.get("interview_started_at")
             if isinstance(started_at, datetime):
                 self._timer_started_at = started_at
+                self._timer_started_monotonic = time.monotonic()
                 self.state["timer_started"] = True
                 self.state["timer_started_at"] = started_at.isoformat()
             if self._is_terminal(existing):
@@ -88,6 +111,17 @@ class LiveKitInterviewBridge:
         session_id = str((self.state or {}).get("interview_session_id") or "")
         if session_id:
             await interview_session_repository.mark_session_in_progress(session_id)
+            await try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.INTERVIEW_STARTED,
+                    source_service=EventSource.INTERVIEW_ENGINE,
+                    correlation_id=session_id,
+                    candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+                    metadata={
+                        "timer_started_at": started_at.isoformat(),
+                    },
+                )
+            )
 
         if self.state is None:
             self.state = {}
@@ -105,13 +139,9 @@ class LiveKitInterviewBridge:
         if self._timer_started_monotonic is not None:
             return max(
                 0,
-                int(time.monotonic() - self._timer_started_monotonic),
+                self._elapsed_before_connection_secs
+                + int(time.monotonic() - self._timer_started_monotonic),
             )
-        if self._timer_started_at is not None:
-            started = self._timer_started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=UTC)
-            return max(0, int((datetime.now(UTC) - started).total_seconds()))
         return max(0, int((self.state or {}).get("elapsed_secs") or 0))
 
     def seconds_until_section_barge_in(self) -> float | None:
@@ -250,12 +280,53 @@ class LiveKitInterviewBridge:
             }
         )
         self.state = state
+        await try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.INTERVIEW_ENDED,
+                source_service=EventSource.INTERVIEW_ENGINE,
+                correlation_id=session_id or self.candidate_assessment_id,
+                candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+                metadata={
+                    "end_reason": "completed",
+                    "session_status": "COMPLETED",
+                    "elapsed_secs": elapsed,
+                },
+                duration_ms=elapsed * 1000,
+            )
+        )
         logger.info(
             "Interview completed; holistic evaluation is queued",
             extra={
                 "candidate_assessment_id": self.candidate_assessment_id,
                 "interview_session_id": session_id,
             },
+        )
+
+    async def record_disconnect(self, reason: str) -> None:
+        """Record an unexpected LiveKit drop under the bounded reconnect policy."""
+
+        state = self.state or {}
+        if (
+            self._is_terminal(state)
+            or state.get("should_close")
+            or state.get("closing_done")
+        ):
+            return
+
+        if not self.interview_session_id or not self.connection_id:
+            logger.warning(
+                "Cannot record disconnect without session connection metadata",
+                extra={
+                    "candidate_assessment_id": self.candidate_assessment_id,
+                },
+            )
+            return
+        await CandidateSessionService().record_disconnect(
+            session_id=uuid.UUID(self.interview_session_id),
+            connection_id=self.connection_id,
+            candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+            reason=reason,
+            elapsed_secs=self.elapsed_secs(),
         )
 
     async def close(self, *, terminated: bool = False) -> str:
@@ -265,6 +336,22 @@ class LiveKitInterviewBridge:
             self.state = {}
         if terminated:
             self.state["session_status"] = "TERMINATED"
+            session_id = str(self.state.get("interview_session_id") or "")
+            elapsed = self.elapsed_secs()
+            await try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.INTERVIEW_ENDED,
+                    source_service=EventSource.INTERVIEW_ENGINE,
+                    correlation_id=(session_id or self.candidate_assessment_id),
+                    candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+                    metadata={
+                        "end_reason": "terminated",
+                        "session_status": "TERMINATED",
+                        "elapsed_secs": elapsed,
+                    },
+                    duration_ms=elapsed * 1000,
+                )
+            )
         else:
             await self.finalize_closing()
         return ""
