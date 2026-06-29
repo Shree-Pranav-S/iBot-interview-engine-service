@@ -27,4 +27,4 @@ class EvaluationNotReadyError(TransientEvaluationError):
 
 
 class EvaluationSchemaError(PermanentEvaluationError):
-    """DeepSeek failed the strict output contract after repair attempts."""
+    """The evaluator failed the strict output contract after repair attempts."""

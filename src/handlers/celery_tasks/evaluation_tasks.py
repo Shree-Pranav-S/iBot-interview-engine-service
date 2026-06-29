@@ -14,12 +14,12 @@ from src.core.services.evaluation_errors import (
     PermanentEvaluationError,
     TransientEvaluationError,
 )
-from src.core.services.evaluation_service import run_holistic_evaluation
+from src.core.services.evaluation_service import (
+    mark_holistic_evaluation_failed,
+    run_holistic_evaluation,
+)
 from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app
-from src.data.repositories.evaluation_repository import (
-    mark_evaluation_failed,
-)
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,15 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _run_async(coroutine: Any) -> Any:
-    """Reuse one loop so pooled async clients never cross closed event loops."""
+    """
+    Reuse one loop so pooled async clients never cross closed event loops.
+
+    Args:
+        coroutine: The asynchronous coroutine to execute.
+
+    Returns:
+        The result of the executed coroutine.
+    """
 
     global _event_loop
     if _event_loop is None or _event_loop.is_closed():
@@ -37,8 +45,14 @@ def _run_async(coroutine: Any) -> Any:
 
 
 def _persist_failure(candidate_assessment_id: str) -> None:
+    """
+    Mark an evaluation as permanently failed in the database.
+
+    Args:
+        candidate_assessment_id: The UUID string of the candidate assessment.
+    """
     try:
-        _run_async(mark_evaluation_failed(candidate_assessment_id))
+        _run_async(mark_holistic_evaluation_failed(candidate_assessment_id))
     except Exception:
         logger.exception(
             "Could not persist holistic evaluation failure status",
@@ -49,6 +63,15 @@ def _persist_failure(candidate_assessment_id: str) -> None:
 
 
 def _retryable_database_error(exc: BaseException) -> bool:
+    """
+    Check if a database error is a transient issue that can safely be retried.
+
+    Args:
+        exc: The exception caught during the database operation.
+
+    Returns:
+        True if the error is retryable (e.g., deadlock, connection issue), False otherwise.
+    """
     if isinstance(exc, OperationalError):
         return True
     if not isinstance(exc, DBAPIError):
@@ -67,7 +90,20 @@ def process_final_evaluation_task(
     self: Any,
     candidate_assessment_id: str,
 ) -> dict[str, Any]:
-    """Evaluate one finalized session with bounded transient retries."""
+    """
+    Evaluate one finalized session with bounded transient retries.
+
+    Args:
+        self: The Celery task instance.
+        candidate_assessment_id: The UUID string of the candidate assessment.
+
+    Returns:
+        A dictionary containing the evaluation result or status.
+
+    Raises:
+        PermanentEvaluationError: If a fundamental issue prevents evaluation.
+        TransientEvaluationError: If a temporary rate limit or connection issue occurs.
+    """
 
     task_id = str(self.request.id or candidate_assessment_id)
     started_at = time.monotonic()
@@ -230,7 +266,15 @@ def process_final_evaluation_task(
 def enqueue_final_evaluation(
     candidate_assessment_id: str,
 ) -> str:
-    """Queue evaluation after closing playout has time to finalize the session."""
+    """
+    Queue evaluation after closing playout has time to finalize the session.
+
+    Args:
+        candidate_assessment_id: The UUID string of the candidate assessment.
+
+    Returns:
+        The celery task ID string for the enqueued evaluation.
+    """
 
     result = process_final_evaluation_task.apply_async(
         args=[candidate_assessment_id],

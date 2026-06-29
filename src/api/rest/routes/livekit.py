@@ -35,6 +35,10 @@ def get_candidate_session_service() -> CandidateSessionService:
     response_model=APIResponse[CandidateSessionBootstrapResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Exchange a one-time invitation for a candidate session token",
+    description=(
+        "Consume a valid candidate invitation or restore its existing active "
+        "browser session credential."
+    ),
 )
 async def enter_candidate_session(
     payload: CandidateSessionEntryRequest,
@@ -55,6 +59,10 @@ async def enter_candidate_session(
     "/session-context",
     response_model=APIResponse[CandidateSessionBootstrapResponse],
     summary="Restore waiting-room context from a candidate session token",
+    description=(
+        "Validate the browser session credential and reload candidate, "
+        "assessment, timer, and reconnection context."
+    ),
 )
 async def get_candidate_session_context(
     payload: CandidateSessionContextRequest,

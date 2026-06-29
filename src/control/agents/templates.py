@@ -231,16 +231,16 @@ QUESTION_GENERATION_FALLBACK_ACKNOWLEDGEMENT = (
 )
 
 TECHNICAL_QUESTION_FALLBACK = (
-    "How would you explain the core purpose of {signal} when working with {skill}?",
-    "Can you describe a practical situation where {signal} matters in {skill}?",
-    "How would you diagnose a problem related to {signal} in {skill}?",
-    "What trade-off would you consider when applying {signal} in {skill}?",
-    "How would you decide whether an approach involving {signal} is suitable in {skill}?",
-    "What common failure would you watch for when dealing with {signal} in {skill}?",
-    "How would you make a solution involving {signal} more reliable in {skill}?",
-    "What would you examine first when reviewing {signal} in a {skill} system?",
-    "How would constraints at production scale affect your approach to {signal} in {skill}?",
-    "What design judgment is most important when applying {signal} with {skill}?",
+    "What foundational concept in {skill} is especially important for writing reliable applications?",
+    "How would you explain a common mistake developers make when first using {skill}?",
+    "How would you debug an unexpected failure in a {skill} application?",
+    "What trade-off would you evaluate before changing the design of a {skill} component?",
+    "How would you verify that a {skill} solution behaves correctly under failure conditions?",
+    "What common production failure would you watch for in a system built with {skill}?",
+    "How would you improve error handling in a {skill} application?",
+    "What would you inspect first when a {skill} application becomes unexpectedly slow?",
+    "How would increased traffic affect the design of a production {skill} system?",
+    "What reliability risk deserves the most attention in a large {skill} system?",
 )
 
 BEHAVIOURAL_QUESTION_FALLBACK = (
@@ -342,7 +342,16 @@ if any(len(bank) != 10 for bank in _BANKS.values()):
 
 
 def choose_template(name: str, **values: Any) -> str:
-    """Choose and safely format one of ten variants from a named bank."""
+    """
+    Choose and safely format one of ten variants from a named bank at random.
+
+    Args:
+        name: The key of the template bank to pull from.
+        **values: Keyword arguments to format into the string template.
+
+    Returns:
+        The fully formatted string.
+    """
 
     bank = _BANKS[name]
     return random.SystemRandom().choice(bank).format(**values)
@@ -354,7 +363,18 @@ def choose_template_avoiding(
     recent: list[str] | tuple[str, ...],
     **values: Any,
 ) -> str:
-    """Choose a variant that avoids recent text and repeated opening phrases."""
+    """
+    Choose a random template variant while actively avoiding recent text and
+    repetitive opening phrases (e.g. avoiding saying 'Thank you' three times in a row).
+
+    Args:
+        name: The key of the template bank.
+        recent: A list of recently spoken phrases to avoid repeating.
+        **values: Keyword arguments for formatting.
+
+    Returns:
+        The formatted string.
+    """
 
     variants = list(template_variants(name, **values))
     normalized_recent = [
@@ -371,6 +391,15 @@ def choose_template_avoiding(
 
 
 def template_variants(name: str, **values: Any) -> tuple[str, ...]:
-    """Return all formatted variants for deterministic fallback selection."""
+    """
+    Return all formatted variants for deterministic fallback selection.
+
+    Args:
+        name: The key of the template bank.
+        **values: Keyword arguments for formatting.
+
+    Returns:
+        A tuple containing all formatted variations.
+    """
 
     return tuple(item.format(**values) for item in _BANKS[name])

@@ -15,7 +15,16 @@ ROLE_INITIAL_DIFFICULTY: dict[str, Difficulty] = {
 
 
 def resume_has_skill(state: InterviewState, skill: str | None) -> bool:
-    """Use tolerant case-insensitive matching for normalized resume skills."""
+    """
+    Use tolerant case-insensitive matching for normalized resume skills.
+
+    Args:
+        state: The current interview state.
+        skill: The specific technical skill to look for.
+
+    Returns:
+        True if a matching skill is found on the candidate's resume.
+    """
 
     target = str(skill or "").strip().casefold()
     if not target:
@@ -34,7 +43,18 @@ def resume_has_skill(state: InterviewState, skill: str | None) -> bool:
 
 
 def target_section(state: InterviewState) -> tuple[int, dict[str, Any]]:
-    """Return the next section selected by normal or forced timing control."""
+    """
+    Return the next section selected by normal progression or forced timing control.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A tuple of (section_index, section_dictionary).
+
+    Raises:
+        RuntimeError: If no sections are available in the state.
+    """
 
     sections = list(state.get("runtime_sections") or [])
     if not sections:
@@ -61,6 +81,16 @@ def target_section(state: InterviewState) -> tuple[int, dict[str, Any]]:
 
 
 def _one_step(current: Difficulty, direction: int) -> Difficulty:
+    """
+    Move one difficulty level up (+1) or down (-1) within the bounded range (easy, medium, hard).
+
+    Args:
+        current: The current difficulty level.
+        direction: Integer step (-1 for easier, +1 for harder).
+
+    Returns:
+        The new difficulty level.
+    """
     index = DIFFICULTIES.index(current)
     return DIFFICULTIES[min(2, max(0, index + direction))]
 
@@ -71,7 +101,19 @@ def determine_question_difficulty(
     skill: str,
     entering_new_section: bool,
 ) -> tuple[Difficulty, bool]:
-    """Return target difficulty and whether this is the single weak-answer probe."""
+    """
+    Determine target difficulty and whether this is the single weak-answer probe.
+    Adjusts question difficulty adaptively based on the candidate's streak of
+    recent live evaluation results for this specific skill.
+
+    Args:
+        state: The current interview state.
+        skill: The technical skill currently being tested.
+        entering_new_section: Whether the interview just transitioned to a new section.
+
+    Returns:
+        A tuple of (Difficulty, probe_deeper_flag).
+    """
 
     resume_floor = resume_has_skill(state, skill)
     initial = ROLE_INITIAL_DIFFICULTY.get(

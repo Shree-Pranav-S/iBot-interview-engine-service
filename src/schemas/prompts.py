@@ -30,7 +30,6 @@ class CandidateResponseClassification(StrictPromptModel):
     )
     is_substantial: bool | None
     question_doubt_response: str | None = Field(max_length=420)
-    reason: str = Field(min_length=1, max_length=240)
 
     @model_validator(mode="after")
     def validate_classification(self) -> CandidateResponseClassification:
@@ -77,7 +76,6 @@ class AnswerEvaluationResponse(StrictPromptModel):
     """The only accepted output from the live answer-evaluation model."""
 
     strength: Literal["weak", "adequate", "strong"]
-    reason: str = Field(min_length=1, max_length=280)
 
 
 FORBIDDEN_INTERVIEWER_FEEDBACK = (

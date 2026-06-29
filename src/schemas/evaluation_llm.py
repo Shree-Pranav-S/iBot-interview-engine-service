@@ -62,7 +62,7 @@ class EvaluationCandidateContext(EvaluationModel):
 
 
 class EvaluationInput(EvaluationModel):
-    """Complete immutable context sent to DeepSeek in one request."""
+    """Complete immutable context sent to the evaluator in one request."""
 
     evaluation_schema_version: str
     transcript_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -119,7 +119,7 @@ class ViolationSummaryOutput(EvaluationModel):
 
 
 class HolisticEvaluationLLMOutput(EvaluationModel):
-    """The only JSON object accepted from the DeepSeek evaluator."""
+    """The only JSON object accepted from the holistic evaluator."""
 
     intro_section_score: float = Field(ge=0.0, le=10.0)
     intro_section_summary: str = Field(min_length=1, max_length=2400)

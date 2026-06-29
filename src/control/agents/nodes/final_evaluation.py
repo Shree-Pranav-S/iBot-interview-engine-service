@@ -17,7 +17,18 @@ logger = logging.getLogger(__name__)
 async def trigger_final_evaluation(
     state: InterviewState,
 ) -> dict[str, Any]:
-    """Queue the idempotent background evaluation and let closing continue."""
+    """
+    Queue the idempotent background evaluation and let closing continue.
+
+    This node acts as a bridge to the Celery evaluation task. It safely
+    enqueues the holistic evaluation once the interview reaches a terminal state.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the background task ID and status.
+    """
 
     existing_task_id = str(state.get("holistic_evaluation_task_id") or "").strip()
     if existing_task_id:

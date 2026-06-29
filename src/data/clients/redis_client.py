@@ -1,5 +1,4 @@
 import logging
-from collections.abc import AsyncGenerator
 
 from redis.asyncio import Redis, from_url
 
@@ -24,14 +23,6 @@ async def get_or_create_client() -> Redis:
         )
 
     return _client
-
-
-async def get_async_redis() -> AsyncGenerator[Redis, None]:
-    client = await get_or_create_client()
-    try:
-        yield client
-    finally:
-        pass
 
 
 async def init_redis() -> None:

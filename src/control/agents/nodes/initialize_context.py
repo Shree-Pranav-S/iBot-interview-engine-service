@@ -6,13 +6,19 @@ import secrets
 from typing import Any
 
 from src.control.agents.state import InterviewState
-from src.data.repositories import (
-    assessment_context_repository,
-    interview_session_repository,
-)
+from src.data.repositories.unit_of_work import InterviewUnitOfWork
 
 
 def _skills(value: Any) -> list[str]:
+    """
+    Extract a unique list of candidate skills from the resume payload.
+
+    Args:
+        value: A list of string skills or dict objects containing skill names.
+
+    Returns:
+        A normalized, deduplicated list of strings.
+    """
     if not isinstance(value, list):
         return []
 
@@ -36,6 +42,15 @@ def _skills(value: Any) -> list[str]:
 
 
 def _experience_years(value: Any) -> float:
+    """
+    Safely extract candidate experience years from the resume payload.
+
+    Args:
+        value: A raw number or string representing years of experience.
+
+    Returns:
+        A float representing years, defaulting to 0.0 on error.
+    """
     try:
         return max(0.0, float(value or 0))
     except (TypeError, ValueError):
@@ -43,6 +58,20 @@ def _experience_years(value: Any) -> float:
 
 
 def _runtime_sections(interview_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Normalize the stored interview plan into an actionable sequence of runtime sections.
+    This ensures each section has an explicitly defined kind (technical, behavioural)
+    and validates time allocations.
+
+    Args:
+        interview_plan: The stored plan dictionary for the candidate.
+
+    Returns:
+        A standardized list of section dictionaries.
+
+    Raises:
+        RuntimeError: If the plan is malformed or missing sections.
+    """
     raw_sections = interview_plan.get("sections")
     if not isinstance(raw_sections, list) or not raw_sections:
         raise RuntimeError("Interview plan must contain at least one section")
@@ -84,75 +113,48 @@ def _runtime_sections(interview_plan: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
-def _max_turn_number(transcript: list[dict[str, Any]]) -> int:
-    return max(
-        (
-            int(item.get("turn_number") or 0)
-            for item in transcript
-            if isinstance(item, dict)
-        ),
-        default=0,
-    )
-
-
-def _question_history(
-    transcript: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
-    questions: list[dict[str, Any]] = []
-    topics: dict[str, list[str]] = {}
-    for item in transcript:
-        if not isinstance(item, dict) or item.get("speaker") != "bot":
-            continue
-        metadata = item.get("metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        question_type = str(
-            item.get("question_type") or metadata.get("question_type") or ""
-        )
-        question_text = str(metadata.get("question_text") or "").strip()
-        if question_type not in {"opening", "new_question"} or not question_text:
-            continue
-        record = {
-            "question_id": item.get("question_id"),
-            "question_text": question_text,
-            "difficulty": item.get("question_difficulty"),
-            "skill": item.get("current_skill"),
-            "section": item.get("current_section"),
-            "topic": metadata.get("topic"),
-            "acknowledgement": metadata.get("acknowledgement"),
-        }
-        questions.append(record)
-        skill_key = str(item.get("current_skill") or "").casefold()
-        topic = str(metadata.get("topic") or "").strip()
-        if skill_key and topic:
-            topics.setdefault(skill_key, []).append(topic)
-    return questions, topics
-
-
 async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
-    """Initialize DB session, company, plan, and the bounded resume context."""
+    """
+    Initialize DB session, company, plan, and the bounded resume context.
+
+    This is the entry point node for any brand new interview. It fetches the
+    candidate context from PostgreSQL, constructs the initial state dictionary,
+    and sets up the time tracking structure.
+
+    Args:
+        state: The LangGraph input state (contains at minimum the candidate assessment ID).
+
+    Returns:
+        The fully initialized InterviewState dictionary.
+    """
 
     candidate_assessment_id = str(state["candidate_assessment_id"])
-    context = await assessment_context_repository.load_interview_context(
-        candidate_assessment_id
-    )
-    if not context:
-        raise RuntimeError(
-            f"Candidate assessment context not found: {candidate_assessment_id}"
+    async with InterviewUnitOfWork() as unit_of_work:
+        context = await unit_of_work.assessment_context.load_interview_context(
+            candidate_assessment_id,
         )
+        if not context:
+            raise RuntimeError(
+                f"Candidate assessment context not found: {candidate_assessment_id}"
+            )
 
-    interview_plan = context.get("interview_plan")
-    if not isinstance(interview_plan, dict):
-        raise RuntimeError(
-            f"Interview plan is missing for candidate assessment: "
-            f"{candidate_assessment_id}"
+        interview_plan = context.get("interview_plan")
+        if not isinstance(interview_plan, dict):
+            raise RuntimeError(
+                "Interview plan is missing for candidate assessment: "
+                f"{candidate_assessment_id}"
+            )
+
+        session = await unit_of_work.interview_sessions.get_or_create_session(
+            candidate_assessment_id,
         )
-
-    session = await interview_session_repository.get_or_create_session(
-        candidate_assessment_id
-    )
-    session_id = str(session["id"])
-    await interview_session_repository.mark_session_in_progress(session_id)
-    await assessment_context_repository.mark_candidate_started(candidate_assessment_id)
+        session_id = str(session["id"])
+        await unit_of_work.interview_sessions.mark_session_in_progress(
+            session_id,
+        )
+        await unit_of_work.assessment_context.mark_candidate_started(
+            candidate_assessment_id,
+        )
 
     resume_parsed = context.get("resume_parsed")
     resume = resume_parsed if isinstance(resume_parsed, dict) else {}
@@ -170,10 +172,6 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         0,
     )
     intro_section = runtime_sections[intro_index]
-    transcript = [
-        item for item in (session.get("transcript") or []) if isinstance(item, dict)
-    ]
-    asked_questions, used_topics = _question_history(transcript)
     duration_mins = int(
         interview_plan.get("total_mins") or context.get("interview_duration_mins") or 30
     )
@@ -207,12 +205,9 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
 
     return {
         "candidate_assessment_id": candidate_assessment_id,
-        "thread_id": candidate_assessment_id,
         "interview_session_id": session_id,
         "candidate_name": str(context.get("candidate_name") or "Candidate"),
         "company_name": str(context.get("company_name") or "the company"),
-        "role_name": str(context.get("role_name") or "the role"),
-        "interview_plan": interview_plan,
         # Deliberately do not retain the complete resume_parsed payload.
         "resume_context": resume_context,
         "inferred_difficulty": str(
@@ -233,9 +228,6 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "last_rephrased_question": None,
         "current_question_difficulty": None,
         "is_self_introduction": True,
-        "previous_question_text": None,
-        "previous_question_difficulty": None,
-        "previous_evaluation": None,
         "candidate_event": None,
         "previous_candidate_response": "",
         "previous_response_duration_ms": None,
@@ -245,10 +237,8 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "last_response_substantial": None,
         "latest_evaluation": None,
         "evaluation_source": None,
-        "last_evaluated_at": None,
-        "last_answer_strength": None,
-        "asked_questions": asked_questions,
-        "used_topics_by_skill": used_topics,
+        "asked_questions": [],
+        "used_topics_by_skill": {},
         "skill_evaluation_streaks": {},
         "question_variation_seed": secrets.token_hex(8),
         "probe_deeper": False,
@@ -262,12 +252,11 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "should_advance_question": False,
         "phase_complete": False,
         "next_action": "deliver_opening",
-        "turn_number": _max_turn_number(transcript) + 1,
+        "turn_number": 1,
         "pending_bot_turn": None,
         "pending_candidate_turn": None,
         "violations_to_persist": [],
         "recent_violations": list(session.get("violations") or [])[-20:],
-        "interview_duration_mins": duration_mins,
         "total_duration_secs": total_duration_secs,
         "elapsed_secs": elapsed_secs,
         "remaining_secs": max(0, total_duration_secs - elapsed_secs),

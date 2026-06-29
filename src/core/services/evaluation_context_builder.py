@@ -32,18 +32,55 @@ class EvaluationContextBundle:
 
 
 def _json_object(value: Any) -> dict[str, Any]:
+    """
+    Safely convert a value to a JSON-like dictionary object.
+
+    Args:
+        value: The value to convert.
+
+    Returns:
+        A dictionary representation of the value, or an empty dictionary if invalid.
+    """
     return dict(value) if isinstance(value, dict) else {}
 
 
 def _json_list(value: Any) -> list[Any]:
+    """
+    Safely convert a value to a list.
+
+    Args:
+        value: The value to convert.
+
+    Returns:
+        A list representation of the value, or an empty list if invalid.
+    """
     return list(value) if isinstance(value, list) else []
 
 
 def _skill_key(value: Any) -> str:
+    """
+    Normalize a skill name into a consistent lowercase string for matching.
+
+    Args:
+        value: The raw skill name.
+
+    Returns:
+        A normalized string containing only alphanumeric characters and allowed symbols (+, #, .).
+    """
     return " ".join(re.findall(r"[a-z0-9+#.]+", str(value).casefold()))
 
 
 def _score(value: Any, default: float = 1.0) -> float:
+    """
+    Safely parse a numerical score and clamp it between 0.0 and 10.0.
+
+    Args:
+        value: The value to parse as a float.
+        default: The fallback value if parsing fails.
+
+    Returns:
+        A clamped float score between 0.0 and 10.0.
+    """
     try:
         return min(10.0, max(0.0, float(value)))
     except (TypeError, ValueError):
@@ -51,6 +88,15 @@ def _score(value: Any, default: float = 1.0) -> float:
 
 
 def _priority_map(jd_analysis: dict[str, Any]) -> dict[str, float]:
+    """
+    Extract a mapping of skill names to their priority scores from the JD analysis.
+
+    Args:
+        jd_analysis: The JSON representation of the Job Description analysis.
+
+    Returns:
+        A dictionary mapping normalized skill keys to their priority scores.
+    """
     priorities: dict[str, float] = {}
     for item in _json_list(jd_analysis.get("skills")):
         if not isinstance(item, dict):
@@ -70,6 +116,16 @@ def _priority_for_skill(
     skill: str,
     priorities: dict[str, float],
 ) -> float:
+    """
+    Determine the priority score for a specific skill using exact and partial matching.
+
+    Args:
+        skill: The skill name to lookup.
+        priorities: A dictionary mapping normalized skill names to their scores.
+
+    Returns:
+        The priority score for the skill, defaulting to 1.0 if not found.
+    """
     key = _skill_key(skill)
     if key in priorities:
         return priorities[key]
@@ -85,6 +141,15 @@ def _priority_for_skill(
 
 
 def _question_counts(transcript: list[dict[str, Any]]) -> dict[str, int]:
+    """
+    Count the number of questions asked per technical skill by analyzing the transcript.
+
+    Args:
+        transcript: The list of transcript turns (messages).
+
+    Returns:
+        A dictionary mapping normalized skill keys to the number of distinct questions asked.
+    """
     question_ids: dict[str, set[str]] = {}
     for turn in transcript:
         if str(turn.get("speaker") or "").casefold() != "bot":
@@ -117,6 +182,20 @@ def _technical_skill_specs(
     interview_plan: dict[str, Any],
     transcript: list[dict[str, Any]],
 ) -> tuple[TechnicalSkillSpec, ...]:
+    """
+    Construct a definitive list of technical skills to be evaluated.
+
+    Args:
+        jd_analysis: The structured JD analysis dictionary.
+        interview_plan: The structured interview plan dictionary.
+        transcript: The list of transcript turns.
+
+    Returns:
+        A tuple of TechnicalSkillSpec objects representing the skills to evaluate.
+
+    Raises:
+        PermanentEvaluationError: If no technical skills could be inferred.
+    """
     priorities = _priority_map(jd_analysis)
     counts = _question_counts(transcript)
     specs: list[TechnicalSkillSpec] = []
@@ -178,6 +257,18 @@ def _transcript_hash(
     jd_analysis: dict[str, Any],
     interview_plan: dict[str, Any],
 ) -> str:
+    """
+    Compute a SHA-256 fingerprint of the evaluation context.
+
+    Args:
+        transcript: The list of transcript turns.
+        violations: Any proctoring violations recorded during the interview.
+        jd_analysis: The parsed JD analysis.
+        interview_plan: The structured interview plan.
+
+    Returns:
+        A hexadecimal string representing the deterministic hash.
+    """
     canonical = json.dumps(
         {
             "transcript": transcript,
@@ -196,7 +287,19 @@ def _transcript_hash(
 def build_evaluation_context(
     source: dict[str, Any],
 ) -> EvaluationContextBundle:
-    """Validate repository data and retain full transcript and violation JSON."""
+    """
+    Validate repository data, extract skills, calculate properties, and build
+    the complete immutable JSON context bundle for one-shot evaluation.
+
+    Args:
+        source: The raw source data dictionary retrieved from the database.
+
+    Returns:
+        An EvaluationContextBundle containing validated evaluation inputs and skills.
+
+    Raises:
+        PermanentEvaluationError: If the source data lacks critical information like transcript or interview plan.
+    """
 
     transcript = [
         dict(item)

@@ -72,6 +72,13 @@ SELF_INTRO_PROFESSIONAL_PATTERN = re.compile(
     r"proficien(?:t|cy)|speciali[sz](?:e|ed|ation)|currently)\b",
     re.IGNORECASE,
 )
+SELF_INTRO_ELABORATION_WORD_THRESHOLD = 15
+
+
+def _spoken_word_count(text: str) -> int:
+    """Count spoken words using the same technical-token rules as classification."""
+
+    return len(re.findall(r"\b[\w+#.-]+\b", text))
 
 
 def _result(
@@ -79,15 +86,25 @@ def _result(
     response_type: str,
     clarification_type: str | None,
     is_substantial: bool | None,
-    reason: str,
     question_doubt_response: str | None = None,
 ) -> dict[str, Any]:
+    """
+    Construct a standardized classification result dictionary.
+
+    Args:
+        response_type: The broad category of the response ('answer', 'clarification', 'silence', etc.).
+        clarification_type: Specific sub-type if the response is a clarification request.
+        is_substantial: Whether the response contains enough substance to evaluate.
+        question_doubt_response: Optional generated response for doubt cases.
+
+    Returns:
+        The dictionary matching CandidateResponseClassification structure.
+    """
     return {
         "response_type": response_type,
         "clarification_type": clarification_type,
         "is_substantial": is_substantial,
         "question_doubt_response": question_doubt_response,
-        "reason": reason,
     }
 
 
@@ -95,13 +112,23 @@ def _deterministic_classification(
     state: InterviewState,
     text: str,
 ) -> dict[str, Any] | None:
+    """
+    Attempt to classify candidate speech using high-confidence regex patterns.
+    This saves LLM calls for obvious cases like silence, 'yes/no', skips, and repeat requests.
+
+    Args:
+        state: The current interview state.
+        text: The transcribed text from the candidate.
+
+    Returns:
+        A classification dictionary if a pattern matched, or None if the LLM is needed.
+    """
     event = state.get("candidate_event") or {}
     if isinstance(event, dict) and event.get("event_type") == "silence_timeout":
         return _result(
             response_type="silence",
             clarification_type=None,
             is_substantial=None,
-            reason="LiveKit reported five seconds without candidate speech.",
         )
 
     if state.get("silence_stage") == "awaiting_think_confirmation":
@@ -110,14 +137,12 @@ def _deterministic_classification(
                 response_type="clarification",
                 clarification_type="time_to_think",
                 is_substantial=None,
-                reason="Candidate accepted the offered thinking time.",
             )
         if NO_PATTERN.search(text):
             return _result(
                 response_type="clarification",
                 clarification_type="decline_think_time",
                 is_substantial=None,
-                reason="Candidate declined the offered thinking time.",
             )
 
     if SKIP_PATTERN.search(text):
@@ -125,47 +150,48 @@ def _deterministic_classification(
             response_type="clarification",
             clarification_type="skip_question",
             is_substantial=None,
-            reason="High-confidence skip or cannot-answer phrase.",
         )
     if REPEAT_PATTERN.search(text):
         return _result(
             response_type="clarification",
             clarification_type="repeat_question",
             is_substantial=None,
-            reason="High-confidence request to repeat the question.",
         )
     if REPHRASE_PATTERN.search(text):
         return _result(
             response_type="clarification",
             clarification_type="rephrase_question",
             is_substantial=None,
-            reason="High-confidence request to rephrase the question.",
         )
     if THINK_PATTERN.search(text):
         return _result(
             response_type="clarification",
             clarification_type="time_to_think",
             is_substantial=None,
-            reason="High-confidence request for thinking time.",
         )
 
     if bool(state.get("is_self_introduction")):
-        words = re.findall(r"\b[\w+#.-]+\b", text)
+        word_count = _spoken_word_count(text)
         has_professional_detail = bool(SELF_INTRO_PROFESSIONAL_PATTERN.search(text))
-        if len(words) >= 18 or (len(words) >= 6 and has_professional_detail):
+        if word_count >= 18 or (word_count >= 6 and has_professional_detail):
             return _result(
                 response_type="answer",
                 clarification_type=None,
-                is_substantial=len(words) >= 12,
-                reason=(
-                    "Deterministic self-introduction safeguard recognized "
-                    "professional background or sufficiently detailed speech."
-                ),
+                is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
             )
     return None
 
 
 def _classification_messages(state: InterviewState) -> list[dict[str, str]]:
+    """
+    Construct the messages to prompt the LLM to classify the candidate's response.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A list of chat messages for the LLM.
+    """
     duration_ms = state.get("previous_response_duration_ms")
     context = {
         "previous_candidate_response": state.get("previous_candidate_response") or "",
@@ -191,19 +217,35 @@ def _classification_messages(state: InterviewState) -> list[dict[str, str]]:
 
 
 def _safe_fallback(text: str) -> CandidateResponseClassification:
-    """Keep a live interview moving without accepting malformed model JSON."""
+    """
+    Keep a live interview moving without accepting malformed model JSON.
+    Used if the classification LLM call fails completely.
 
-    words = re.findall(r"\b[\w+#.-]+\b", text)
+    Args:
+        text: The raw transcribed text.
+
+    Returns:
+        A default safe classification treating the text as an answer.
+    """
+
     return CandidateResponseClassification(
         response_type="answer",
         clarification_type=None,
-        is_substantial=len(words) > 2,
+        is_substantial=_spoken_word_count(text) > 2,
         question_doubt_response=None,
-        reason="Conservative answer fallback after classification service failure.",
     )
 
 
 def _resume_has_skill(state: InterviewState) -> bool:
+    """
+    Check if the currently active technical skill is explicitly listed on the candidate's resume.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        True if there is a match, False otherwise.
+    """
     skill = str(state.get("current_technical_skill") or "").strip().casefold()
     if not skill:
         return False
@@ -227,6 +269,18 @@ def _violation(
     severity: str,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    """
+    Construct a deterministic violation record for proctoring.
+
+    Args:
+        state: The current interview state.
+        violation_type: The specific code for the violation.
+        severity: 'low', 'medium', or 'high'.
+        metadata: Additional context for the violation.
+
+    Returns:
+        A structured violation dictionary.
+    """
     return {
         "violation_id": deterministic_violation_id(
             str(state["interview_session_id"]),
@@ -249,6 +303,19 @@ def _turn_violations(
     clarification_type: str | None,
     resume_skill_match: bool,
 ) -> list[dict[str, Any]]:
+    """
+    Analyze the classification to detect and generate proctoring violations for this turn.
+    Catches irrelevant answers, skipped resume skills, and experience inflation.
+
+    Args:
+        state: The current interview state.
+        response_type: The determined response type.
+        clarification_type: The determined clarification type, if any.
+        resume_skill_match: Whether the current skill is on the resume.
+
+    Returns:
+        A list of triggered violation dictionaries.
+    """
     violations: list[dict[str, Any]] = []
     if response_type == "irrelevant":
         violations.append(
@@ -303,7 +370,20 @@ def _turn_violations(
 
 
 async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
-    """Classify speech, bypassing the LLM for deterministic high-confidence cases."""
+    """
+    Classify candidate speech as an answer, silence, or clarification request.
+
+    Bypasses the LLM for deterministic high-confidence cases. Identifies turn
+    violations, decides if an answer is substantial enough to evaluate, and routes
+    the graph to the appropriate next node.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A dictionary containing the classification results, detected violations,
+        and the `next_action` routing key.
+    """
 
     text = str(state.get("previous_candidate_response") or "")
     classification = _deterministic_classification(state, text)
@@ -331,21 +411,13 @@ async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
 
     response_type = str(classification["response_type"])
     is_substantial = classification.get("is_substantial")
-    duration_ms = state.get("previous_response_duration_ms")
-    self_intro_short_override = (
-        response_type == "answer"
-        and bool(state.get("is_self_introduction"))
-        and not bool(state.get("self_intro_elaboration_requested"))
-        and duration_ms is not None
-        and int(duration_ms) <= 15_000
-    )
-    if self_intro_short_override:
-        is_substantial = False
-        classification["is_substantial"] = False
-        classification["reason"] = (
-            f"{classification['reason']} The first self-introduction response "
-            "was no longer than 15 seconds, so phase-one policy requires elaboration."
-        )[:240]
+    if response_type == "answer" and bool(state.get("is_self_introduction")):
+        # Self-introduction elaboration is intentionally governed by one metric:
+        # an answer with fewer than 15 spoken words needs more detail.
+        is_substantial = (
+            _spoken_word_count(text) >= SELF_INTRO_ELABORATION_WORD_THRESHOLD
+        )
+        classification["is_substantial"] = is_substantial
 
     clarification_type = classification.get("clarification_type")
     resume_skill_match = clarification_type == "skip_question" and _resume_has_skill(

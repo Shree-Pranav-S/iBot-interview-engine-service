@@ -2,17 +2,13 @@
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
 
-from sqlalchemy import Float, ForeignKey, Integer, Text
+from sqlalchemy import Float, Integer, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from src.data.models.postgres.base import Base
-
-if TYPE_CHECKING:
-    from src.data.models.postgres.interview_session import InterviewSession
 
 
 class InterviewEvaluation(Base):
@@ -32,7 +28,6 @@ class InterviewEvaluation(Base):
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
     )
@@ -138,11 +133,6 @@ class InterviewEvaluation(Base):
         TIMESTAMP(timezone=True),
         nullable=False,
         server_default=func.now(),
-    )
-
-    session: Mapped["InterviewSession"] = relationship(
-        back_populates="evaluation",
-        uselist=False,
     )
 
     def __repr__(self) -> str:

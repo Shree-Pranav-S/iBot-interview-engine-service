@@ -27,6 +27,20 @@ def _reply(
     next_action: str = "await_candidate_response",
     **updates: Any,
 ) -> dict[str, Any]:
+    """
+    Construct a complete bot turn that immediately yields control back to LiveKit.
+
+    Args:
+        state: The current interview state.
+        text: The text the bot should speak.
+        reply_type: The internal categorization of the response.
+        question_type: The tracking metadata type for the turn.
+        next_action: The next node to route to (usually waiting for the candidate).
+        **updates: Additional state updates to apply.
+
+    Returns:
+        A dictionary of state updates containing the `pending_bot_turn`.
+    """
     clean_text = " ".join(text.split())
     pending_bot_turn = build_bot_turn(
         state,
@@ -70,7 +84,17 @@ def _fallback_rephrase(
     *,
     use_alternate: bool = False,
 ) -> str:
-    """Provide a meaning-preserving rewrite if the fast model is unavailable."""
+    """
+    Provide a meaning-preserving rewrite if the fast model is unavailable.
+    Uses regex replacements to manually alter common question structures.
+
+    Args:
+        question: The original question text.
+        use_alternate: Whether to use the secondary rewrite pattern (if the first was already used).
+
+    Returns:
+        The rewritten question.
+    """
 
     original = " ".join(question.split()).rstrip(" ?")
     transformations = (
@@ -134,6 +158,17 @@ async def _rephrase_question(
     state: InterviewState,
     question: str,
 ) -> str:
+    """
+    Use an LLM to rephrase a question without changing its core technical intent.
+    Validates that the rewritten question is structurally different enough from the original.
+
+    Args:
+        state: The current interview state.
+        question: The question to rewrite.
+
+    Returns:
+        The rewritten string.
+    """
     context = {
         "original_question": question,
         "previous_rephrase": state.get("last_rephrased_question"),
@@ -200,7 +235,19 @@ async def _rephrase_question(
 
 
 async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
-    """Select static speech or use a bounded LLM-produced doubt clarification."""
+    """
+    Select static speech or use a bounded LLM-produced doubt clarification.
+
+    This node handles all bot speech that is NOT a new dynamic question (e.g.,
+    handling silence, irrelevant answers, requests to repeat, skips). It either
+    replies and waits, or generates a preface and routes to `generate_question`.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the bot reply and next routing action.
+    """
 
     response_type = state.get("last_response_type")
     classification = state.get("last_classification") or {}

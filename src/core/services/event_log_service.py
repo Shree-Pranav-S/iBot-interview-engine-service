@@ -2,26 +2,15 @@
 
 import logging
 
-from src.data.clients.postgres_client import get_session_factory
-from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.unit_of_work import InterviewUnitOfWork
 from src.schemas.event_log import EventLogCreate
 
 logger = logging.getLogger(__name__)
 
 
-class EventLogService:
-    def __init__(self, repository: EventLogsRepository) -> None:
-        self._repository = repository
-
-    async def record(self, event: EventLogCreate) -> None:
-        await self._repository.create(event)
-
-
 async def record_event_in_background(event: EventLogCreate) -> None:
-    session_factory = await get_session_factory()
-    async with session_factory() as session, session.begin():
-        service = EventLogService(EventLogsRepository(session))
-        await service.record(event)
+    async with InterviewUnitOfWork() as unit_of_work:
+        await unit_of_work.event_logs.create(event)
 
 
 async def try_record_event_in_background(event: EventLogCreate) -> None:

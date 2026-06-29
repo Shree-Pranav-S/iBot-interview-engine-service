@@ -17,7 +17,23 @@ def build_bot_turn(
     acknowledgement: str | None = None,
     topic: str | None = None,
 ) -> dict[str, Any]:
-    """Build one bot transcript item for the current interaction number."""
+    """
+    Build one bot transcript item for the current interaction number.
+
+    Constructs a dictionary that represents the bot's speech and relevant
+    metadata for the current turn, formatted for database persistence.
+
+    Args:
+        state: The current interview state.
+        text: The full text the bot is scheduled to speak.
+        question_type: The internal categorization of the bot's speech.
+        question_text: The core question being asked, if any.
+        acknowledgement: Any conversational bridge phrase used.
+        topic: The specific topic or signal being probed.
+
+    Returns:
+        A dictionary representing the bot turn.
+    """
 
     session_id = str(state["interview_session_id"])
     turn_number = int(state.get("turn_number") or 1)
@@ -53,7 +69,19 @@ def build_candidate_turn(
     state: InterviewState,
     event: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a candidate item; classification enriches it before persistence."""
+    """
+    Build a candidate item; classification enriches it before persistence.
+
+    Constructs the base dictionary representing the candidate's speech. The
+    classifier node will later append `response_type` and evaluation results.
+
+    Args:
+        state: The current interview state.
+        event: The incoming STT event dictionary from LiveKit.
+
+    Returns:
+        A dictionary representing the candidate turn.
+    """
 
     session_id = str(state["interview_session_id"])
     turn_number = int(state.get("turn_number") or 1)

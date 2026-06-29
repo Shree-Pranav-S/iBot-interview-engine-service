@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 def _evaluation_messages(state: InterviewState) -> list[dict[str, str]]:
+    """
+    Construct the messages to prompt the LLM for a live evaluation of the candidate's answer.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A list of chat messages containing the evaluation system prompt and the candidate's answer.
+    """
     context = {
         "previous_candidate_response": state.get("previous_candidate_response") or "",
         "previous_question": state.get("current_question_text") or "",
@@ -39,7 +48,18 @@ def _evaluation_messages(state: InterviewState) -> list[dict[str, str]]:
 
 
 async def evaluate_substantial_answer(state: InterviewState) -> dict[str, Any]:
-    """Evaluate one answer and retain only the phase-one live result."""
+    """
+    Evaluate one substantial answer and retain only the phase-one live result.
+
+    This node classifies the response strength as weak, adequate, or strong, and updates
+    streak counters for adaptive difficulty tuning in the `question_strategy` node.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the live evaluation result, updated streaks, and routing key.
+    """
 
     source = "llm"
     try:
@@ -58,7 +78,6 @@ async def evaluate_substantial_answer(state: InterviewState) -> dict[str, Any]:
         # A neutral valid result is safer than inventing a negative assessment.
         result = AnswerEvaluationResponse(
             strength="adequate",
-            reason="Neutral fallback because the live evaluation service failed.",
         )
         source = "validated_fallback"
 
@@ -95,8 +114,6 @@ async def evaluate_substantial_answer(state: InterviewState) -> dict[str, Any]:
     return {
         "latest_evaluation": result.model_dump(),
         "evaluation_source": source,
-        "last_evaluated_at": evaluated_at,
-        "last_answer_strength": result.strength,
         "skill_evaluation_streaks": skill_streaks,
         "pending_candidate_turn": pending_candidate_turn,
         "next_action": "check_time",

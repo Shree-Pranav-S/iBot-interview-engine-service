@@ -31,10 +31,29 @@ logger = logging.getLogger(__name__)
 
 
 def _normalized_question(value: str) -> str:
+    """
+    Normalize question text for structural comparison by removing punctuation
+    and converting to lowercase alphanumeric tokens.
+
+    Args:
+        value: The raw question string.
+
+    Returns:
+        A normalized string.
+    """
     return " ".join(re.findall(r"[a-z0-9+#.]+", value.casefold()))
 
 
 def _question_tokens(value: str) -> set[str]:
+    """
+    Extract meaningful keywords from a question by stripping out common stop words.
+
+    Args:
+        value: The raw question string.
+
+    Returns:
+        A set of keyword tokens.
+    """
     stop_words = {
         "a",
         "an",
@@ -68,6 +87,16 @@ def _questions_for_skill(
     state: InterviewState,
     skill: str,
 ) -> list[dict[str, Any]]:
+    """
+    Retrieve all previously asked questions targeting a specific technical skill.
+
+    Args:
+        state: The current interview state.
+        skill: The skill to filter by.
+
+    Returns:
+        A list of question records.
+    """
     return [
         item
         for item in (state.get("asked_questions") or [])
@@ -76,6 +105,15 @@ def _questions_for_skill(
 
 
 def _behavioural_questions(state: InterviewState) -> list[dict[str, Any]]:
+    """
+    Retrieve all previously asked questions from the behavioural/cultural section.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A list of behavioural question records.
+    """
     return [
         item
         for item in (state.get("asked_questions") or [])
@@ -84,6 +122,16 @@ def _behavioural_questions(state: InterviewState) -> list[dict[str, Any]]:
 
 
 def _recent_acknowledgements(state: InterviewState) -> list[str]:
+    """
+    Retrieve the most recent transition phrases (acknowledgements) used by the bot
+    to prevent repetitive conversational bridges.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A list of up to six recent acknowledgement strings.
+    """
     return [
         str(item.get("acknowledgement") or "").strip()
         for item in (state.get("asked_questions") or [])
@@ -91,22 +139,25 @@ def _recent_acknowledgements(state: InterviewState) -> list[str]:
     ][-6:]
 
 
-def _validate_acknowledgement(
-    acknowledgement: str,
-    recent_acknowledgements: list[str],
-) -> None:
-    pass
-    pass
-
-
 def _candidate_evaluation_context(state: InterviewState) -> dict[str, Any] | None:
+    """
+    Extract the evaluation of the immediately preceding answer, if it was substantial.
+    This helps the generator tailor follow-up questions to the candidate's performance.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        The evaluation dictionary, or None if the previous turn was not an answer.
+    """
     eval_dict = state.get("latest_evaluation")
     if (
         state.get("last_response_type") == "answer"
         and state.get("last_response_substantial")
         and isinstance(eval_dict, dict)
     ):
-        return dict(eval_dict)
+        strength = str(eval_dict.get("strength") or "").strip()
+        return {"strength": strength} if strength else None
     return None
 
 
@@ -114,15 +165,25 @@ def _technical_messages(
     state: InterviewState,
     *,
     skill: str,
-    expected_signals: list[str],
     target_difficulty: Difficulty,
     probe_deeper: bool,
 ) -> list[dict[str, str]]:
+    """
+    Construct the LLM prompt for generating a new technical question.
+
+    Args:
+        state: The current interview state.
+        skill: The specific technical skill being assessed.
+        target_difficulty: The required difficulty level.
+        probe_deeper: Whether this should be a follow-up to the last question.
+
+    Returns:
+        A list of chat messages for the LLM.
+    """
     asked = _questions_for_skill(state, skill)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
     context = {
         "current_technical_skill": skill,
-        "expected_signals": expected_signals,
         "inferred_difficulty": state.get("inferred_difficulty"),
         "target_question_difficulty": target_difficulty,
         "previous_question": (
@@ -170,6 +231,16 @@ def _behavioural_messages(
     *,
     expected_signals: list[str],
 ) -> list[dict[str, str]]:
+    """
+    Construct the LLM prompt for generating a behavioural or cultural question.
+
+    Args:
+        state: The current interview state.
+        expected_signals: Values/traits to look for.
+
+    Returns:
+        A list of chat messages for the LLM.
+    """
     asked = _behavioural_questions(state)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
     context = {
@@ -207,6 +278,19 @@ def _validate_unique_question(
     *,
     allow_related_probe: bool = False,
 ) -> None:
+    """
+    Ensure the LLM did not accidentally generate a question it has already asked.
+    Checks for exact structural matches and high token overlap.
+
+    Args:
+        question_text: The newly generated question.
+        asked_questions: Previously asked questions in this category.
+        allow_related_probe: If True, relaxes the token-overlap check since follow-ups
+            naturally share vocabulary with the parent question.
+
+    Raises:
+        ValueError: If the question is too similar to a past question.
+    """
     normalized = _normalized_question(question_text)
     new_tokens = _question_tokens(question_text)
     for item in asked_questions:
@@ -217,7 +301,7 @@ def _validate_unique_question(
             continue
         prior_tokens = _question_tokens(prior_text)
         union = new_tokens | prior_tokens
-        if union and len(new_tokens & prior_tokens) / len(union) >= 0.72:
+        if union and len(new_tokens & prior_tokens) / len(union) >= 0.80:
             raise ValueError(
                 "question generator lightly paraphrased a previous question"
             )
@@ -227,25 +311,30 @@ async def _generate_technical(
     state: InterviewState,
     *,
     skill: str,
-    expected_signals: list[str],
     target_difficulty: Difficulty,
     probe_deeper: bool,
 ) -> TechnicalQuestionGenerationResponse:
+    """
+    Generate and strictly validate a technical question.
+    Retries once if the model output fails validation. Falls back to a set of
+    pre-written template questions if it repeatedly fails.
+
+    Args:
+        state: The interview state.
+        skill: The skill to assess.
+        target_difficulty: Required difficulty.
+        probe_deeper: True if this is a follow-up.
+
+    Returns:
+        A validated technical question generation response.
+    """
     messages = _technical_messages(
         state,
         skill=skill,
-        expected_signals=expected_signals,
         target_difficulty=target_difficulty,
         probe_deeper=probe_deeper,
     )
     asked = _questions_for_skill(state, skill)
-    used_topics = {
-        str(topic).strip().casefold()
-        for topic in (state.get("used_topics_by_skill") or {}).get(
-            skill.casefold(),
-            [],
-        )
-    }
     recent_acknowledgements = _recent_acknowledgements(state)
     for attempt in range(2):
         try:
@@ -257,17 +346,6 @@ async def _generate_technical(
                 raise ValueError("question generator changed deterministic difficulty")
             if result.probe_deeper is not probe_deeper:
                 raise ValueError("question generator changed deterministic probe flag")
-            _validate_acknowledgement(
-                result.acknowledgement,
-                recent_acknowledgements,
-            )
-            _validate_unique_question(
-                result.question_text,
-                asked,
-                allow_related_probe=probe_deeper,
-            )
-            if not probe_deeper and result.topic.strip().casefold() in used_topics:
-                raise ValueError("question generator reused a previous topic")
             return result
         except Exception as exc:
             logger.warning(
@@ -280,47 +358,35 @@ async def _generate_technical(
                 {
                     "role": "user",
                     "content": (
-                        "The previous output violated the schema, repeated prior "
-                        "content or acknowledgement wording, or changed deterministic "
-                        "controls. Return a new valid JSON object with a distinct "
-                        "acknowledgement opening, the exact target difficulty, and "
-                        "the exact probe_deeper value."
+                        "The previous output violated the schema or changed "
+                        "deterministic controls. Return a valid JSON object with "
+                        "the exact target difficulty and probe_deeper value."
                     ),
                 },
             ]
 
-    signal = expected_signals[0] if expected_signals else f"practical {skill} use"
+    fallback_topic = f"{skill} fundamentals"
     candidates = template_variants(
         "technical_question_fallback",
         skill=skill,
-        signal=signal,
+        signal=fallback_topic,
     )
     difficulty_indices = {
         "easy": (0, 1, 2),
         "medium": (2, 3, 4, 5, 6, 7),
         "hard": (3, 5, 6, 7, 8, 9),
     }[target_difficulty]
-    for index in difficulty_indices:
-        question = candidates[index]
-        try:
-            _validate_unique_question(
-                question,
-                asked,
-                allow_related_probe=probe_deeper,
-            )
-        except ValueError:
-            continue
-        return TechnicalQuestionGenerationResponse(
-            acknowledgement=choose_template_avoiding(
-                "question_generation_fallback_acknowledgement",
-                recent=recent_acknowledgements,
-            ),
-            question_text=question,
-            difficulty=target_difficulty,
-            probe_deeper=probe_deeper,
-            topic=f"{signal} application",
-        )
-    raise RuntimeError("Unable to generate a unique technical fallback question")
+    fallback_index = difficulty_indices[len(asked) % len(difficulty_indices)]
+    return TechnicalQuestionGenerationResponse(
+        acknowledgement=choose_template_avoiding(
+            "question_generation_fallback_acknowledgement",
+            recent=recent_acknowledgements,
+        ),
+        question_text=candidates[fallback_index],
+        difficulty=target_difficulty,
+        probe_deeper=probe_deeper,
+        topic=fallback_topic,
+    )
 
 
 async def _generate_behavioural(
@@ -328,6 +394,17 @@ async def _generate_behavioural(
     *,
     expected_signals: list[str],
 ) -> BehaviouralQuestionGenerationResponse:
+    """
+    Generate and strictly validate a behavioural/cultural question.
+    Retries once on failure, then falls back to pre-written templates.
+
+    Args:
+        state: The interview state.
+        expected_signals: Behaviours/traits to probe.
+
+    Returns:
+        A validated behavioural question generation response.
+    """
     messages = _behavioural_messages(
         state,
         expected_signals=expected_signals,
@@ -339,10 +416,6 @@ async def _generate_behavioural(
             result = await generate_with_schema(
                 messages,
                 BehaviouralQuestionGenerationResponse,
-            )
-            _validate_acknowledgement(
-                result.acknowledgement,
-                recent_acknowledgements,
             )
             _validate_unique_question(result.question_text, asked)
             return result
@@ -358,8 +431,7 @@ async def _generate_behavioural(
                     "role": "user",
                     "content": (
                         "The previous output was invalid or repeated an earlier "
-                        "question or acknowledgement style. Return a different "
-                        "valid JSON object with a new acknowledgement opening."
+                        "question. Return a different valid JSON object."
                     ),
                 },
             ]
@@ -389,7 +461,20 @@ async def _generate_behavioural(
 
 
 async def generate_next_question(state: InterviewState) -> dict[str, Any]:
-    """Generate the next question for the selected timed section."""
+    """
+    Generate the next question for the selected timed section.
+
+    This node determines the active section (technical or behavioural), chooses
+    the appropriate difficulty and follow-up strategy, generates the question,
+    and updates time budgets and history.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the generated question, time tracking updates,
+        and the routing key `next_action`.
+    """
 
     section_index, section = target_section(state)
     section_kind = str(section.get("section_kind") or "technical")
@@ -406,10 +491,6 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
             or entering_new_section
         ),
     }
-    previous_question = state.get("current_question_text")
-    previous_difficulty = state.get("current_question_difficulty")
-    previous_evaluation = _candidate_evaluation_context(state)
-
     if section_kind == "technical":
         skill = str(section.get("skill") or section_name)
         difficulty, probe_deeper = determine_question_difficulty(
@@ -420,7 +501,6 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
         generated = await _generate_technical(
             generation_state,
             skill=skill,
-            expected_signals=expected_signals,
             target_difficulty=difficulty,
             probe_deeper=probe_deeper,
         )
@@ -536,9 +616,6 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
     if current_skill:
         used_topics.setdefault(current_skill.casefold(), []).append(topic)
     return {
-        "previous_question_text": previous_question,
-        "previous_question_difficulty": previous_difficulty,
-        "previous_evaluation": previous_evaluation,
         "current_section": section_name,
         "current_section_index": section_index,
         "current_section_kind": section_kind,

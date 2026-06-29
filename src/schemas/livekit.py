@@ -57,6 +57,8 @@ class CandidateConnectionContext(AppBaseModel):
     assessment_id: uuid.UUID
     candidate_name: str
     session_token_expires_at: datetime
+    elapsed_secs: int = 0
+    interview_started: bool = False
 
 
 class LiveKitTokenResponse(AppBaseModel):
@@ -65,3 +67,5 @@ class LiveKitTokenResponse(AppBaseModel):
     livekit_url: str
     token: str
     room_name: str
+    elapsed_secs: int = 0
+    interview_started: bool = False

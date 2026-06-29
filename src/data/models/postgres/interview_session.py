@@ -10,19 +10,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy import Integer, Text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from src.data.models.postgres.base import Base
-
-if TYPE_CHECKING:
-    from src.data.models.postgres.answer_evaluation import AnswerEvaluation
-    from src.data.models.postgres.interview_evaluation import InterviewEvaluation
-    from src.data.models.postgres.transcript_turn import TranscriptTurn
 
 
 class InterviewSession(Base):
@@ -117,22 +111,6 @@ class InterviewSession(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
-    )
-
-    transcript_turns: Mapped[list[TranscriptTurn]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-        order_by="TranscriptTurn.turn_number",
-    )
-    answer_evaluations: Mapped[list[AnswerEvaluation]] = relationship(
-        back_populates="session",
-        cascade="all, delete-orphan",
-        order_by="AnswerEvaluation.turn_number",
-    )
-    evaluation: Mapped[InterviewEvaluation | None] = relationship(
-        back_populates="session",
-        uselist=False,
-        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:

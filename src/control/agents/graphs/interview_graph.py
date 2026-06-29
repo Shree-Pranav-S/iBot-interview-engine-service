@@ -40,40 +40,55 @@ _checkpointer: Any | None = None
 
 
 def _checkpoint_uri(database_url: str) -> str:
+    """
+    Format the SQLAlchemy connection string for the AsyncPostgresSaver.
+
+    Args:
+        database_url: The raw database connection string.
+
+    Returns:
+        The formatted URI.
+    """
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
 def _route_after_classification(state: InterviewState) -> str:
+    """Route to evaluation if answer is substantial, else directly to persistence."""
     if state.get("next_action") == "evaluate_answer":
         return "evaluate_substantial_answer"
     return "persist_candidate_output"
 
 
 def _route_after_await(state: InterviewState) -> str:
+    """Route to barge-in handler if timed out, otherwise proceed to classification."""
     if state.get("next_action") == "force_section_time_barge_in":
         return "force_section_time_barge_in"
     return "classify_candidate_response"
 
 
 def _route_after_candidate_persistence(state: InterviewState) -> str:
+    """Route to time check after an answer, else directly generate bot response."""
     if state.get("next_action") == "check_time":
         return "check_time_after_substantial_answer"
     return "generate_bot_response"
 
 
 def _route_after_static_response(state: InterviewState) -> str:
+    """Route to question generation if requested, else persist the static response."""
     if state.get("next_action") == "generate_question":
         return "generate_next_question"
     return "persist_bot_output"
 
 
 def _route_after_time_check(state: InterviewState) -> str:
+    """Route to closing if interview is over, otherwise generate next question."""
     if state.get("next_action") == "generate_closing":
         return "generate_closing_message"
     return "generate_next_question"
 
 
 def _route_after_time_barge_in(state: InterviewState) -> str:
+    """Route based on what the barge-in handler decided to force."""
     if state.get("next_action") == "generate_closing":
         return "generate_closing_message"
     if state.get("next_action") == "await_candidate_response":
@@ -82,13 +97,25 @@ def _route_after_time_barge_in(state: InterviewState) -> str:
 
 
 def _route_after_bot_persistence(state: InterviewState) -> str:
+    """Route to wait for the user, unless the interview is scheduled to close."""
     if state.get("should_close") or state.get("next_action") == "end":
         return "final_evaluation"
     return "await_candidate_response"
 
 
 def build_interview_graph(checkpointer: Any | None = None) -> Any:
-    """Build the timed, section-aware interview workflow."""
+    """
+    Build the timed, section-aware interview workflow graph.
+
+    Constructs the directed state graph defining the cyclical process of
+    speaking, waiting, classifying, evaluating, timing, and generating logic.
+
+    Args:
+        checkpointer: The LangGraph checkpointer instance for state persistence.
+
+    Returns:
+        The compiled StateGraph ready for execution.
+    """
 
     builder = StateGraph(InterviewState)
     builder.add_node("initialize_interview_context", initialize_interview_context)
@@ -181,7 +208,15 @@ def build_interview_graph(checkpointer: Any | None = None) -> Any:
 
 
 async def init_graph(database_url: str | None = None) -> Any:
-    """Initialize the singleton graph and durable PostgreSQL checkpointer."""
+    """
+    Initialize the singleton graph and durable PostgreSQL checkpointer.
+
+    Args:
+        database_url: Optional connection string override.
+
+    Returns:
+        The initialized graph instance.
+    """
 
     global _checkpointer, _checkpointer_context, _graph
     if _graph is not None:
@@ -197,7 +232,12 @@ async def init_graph(database_url: str | None = None) -> Any:
 
 
 async def get_graph() -> Any:
-    """Return the initialized graph, lazily initializing in worker processes."""
+    """
+    Return the initialized graph, lazily initializing in worker processes if needed.
+
+    Returns:
+        The compiled interview graph instance.
+    """
 
     if _graph is None:
         return await init_graph()
@@ -205,7 +245,10 @@ async def get_graph() -> Any:
 
 
 async def close_graph() -> None:
-    """Close the checkpointer connection owned by this process."""
+    """
+    Close the checkpointer connection owned by this process and flush background tasks.
+    Must be called during application shutdown.
+    """
 
     global _checkpointer, _checkpointer_context, _graph
     await drain_background_persistence()

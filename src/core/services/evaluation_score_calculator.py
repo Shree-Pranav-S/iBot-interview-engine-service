@@ -9,7 +9,7 @@ from src.core.services.evaluation_context_builder import (
     EVALUATION_SCHEMA_VERSION,
     EvaluationContextBundle,
 )
-from src.core.services.evaluation_llm_client import DeepSeekEvaluationResult
+from src.core.services.evaluation_llm_client import NvidiaEvaluationResult
 from src.core.services.evaluation_prompt import (
     HOLISTIC_EVALUATION_MODEL_PROVIDER,
     HOLISTIC_EVALUATION_PROMPT_VERSION,
@@ -32,16 +32,44 @@ PENALTY_BY_SEVERITY: dict[str, float] = {
 
 
 def _clamp_score(value: float) -> float:
+    """
+    Ensure a score is within the allowed boundaries (0.0 to 10.0).
+
+    Args:
+        value: The raw float score.
+
+    Returns:
+        The score clamped to [0.0, 10.0].
+    """
     return min(10.0, max(0.0, float(value)))
 
 
 def _round_score(value: float) -> float:
+    """
+    Clamp a score to boundaries and round it to two decimal places.
+
+    Args:
+        value: The raw float score.
+
+    Returns:
+        The rounded and clamped score.
+    """
     return round(_clamp_score(value), 2)
 
 
 def _technical_score(
     skill_scores: dict[str, dict[str, Any]],
 ) -> float:
+    """
+    Calculate the overall technical score as a weighted average of individual skill scores.
+    The weight is determined by applying an exponent to the skill's priority score.
+
+    Args:
+        skill_scores: The dictionary mapping skill names to their score details.
+
+    Returns:
+        The calculated weighted technical score (0.0 to 10.0).
+    """
     weighted_total = 0.0
     weight_total = 0.0
     for details in skill_scores.values():
@@ -58,6 +86,15 @@ def _technical_score(
 
 
 def _violation_penalty(severity_counts: dict[str, int]) -> float:
+    """
+    Calculate the total score penalty to apply based on the number and severity of violations.
+
+    Args:
+        severity_counts: A dictionary mapping severity levels to the count of occurrences.
+
+    Returns:
+        The total float penalty to subtract from the final score.
+    """
     return sum(
         max(0, int(severity_counts.get(severity) or 0)) * penalty
         for severity, penalty in PENALTY_BY_SEVERITY.items()
@@ -72,6 +109,21 @@ def _recommendation(
     critical_violation_count: int,
     skill_scores: dict[str, dict[str, Any]],
 ) -> tuple[str, list[str]]:
+    """
+    Determine the final hiring recommendation based on strict deterministic thresholds.
+    Applies hard gates (e.g., critical violations, low technical score) to override the LLM.
+
+    Args:
+        final_score: The overall calculated score (0-10).
+        technical_score: The calculated technical skill score (0-10).
+        validated_violation_count: The total number of valid violations.
+        critical_violation_count: The number of critical violations.
+        skill_scores: The individual skill scores to check for high-priority failures.
+
+    Returns:
+        A tuple containing the recommendation string ('hire', 'consider', 'no hire')
+        and a list of any hard-gate reasons triggered.
+    """
     gates: list[str] = []
     if validated_violation_count > 7:
         gates.append("More than seven violations were validated")
@@ -100,6 +152,15 @@ def _recommendation(
 def _strengths_and_concerns(
     skill_scores: dict[str, dict[str, Any]],
 ) -> tuple[list[str], list[str]]:
+    """
+    Identify notable strengths and concerns based on the individual skill scores.
+
+    Args:
+        skill_scores: The individual skill scores.
+
+    Returns:
+        A tuple of two lists: strengths (skills scoring >= 7.5) and concerns (skills scoring < 5.5).
+    """
     strengths: list[str] = []
     concerns: list[str] = []
     for skill, details in skill_scores.items():
@@ -107,9 +168,9 @@ def _strengths_and_concerns(
             continue
         score = float(details.get("score") or 0.0)
         priority = float(details.get("priority_score") or 0.0)
-        if score >= 7.5:
+        if score >= 7.0:
             strengths.append(skill)
-        if score < 5.5 or (priority >= HIGH_PRIORITY_THRESHOLD and score < 6.0):
+        if score < 5.0 or (priority >= HIGH_PRIORITY_THRESHOLD and score < 5.5):
             concerns.append(skill)
     return strengths, concerns
 
@@ -117,9 +178,22 @@ def _strengths_and_concerns(
 def calculate_final_evaluation(
     *,
     bundle: EvaluationContextBundle,
-    model_result: DeepSeekEvaluationResult,
+    model_result: NvidiaEvaluationResult,
 ) -> FinalEvaluationRecord:
-    """Replace model aggregates with authoritative deterministic calculations."""
+    """
+    Replace model aggregates with authoritative deterministic calculations.
+
+    This acts as the final decision layer. It ignores the LLM's own calculation
+    of the overall score, recalculates it using proper priority weighting, applies
+    violation penalties, and enforces deterministic hiring gates.
+
+    Args:
+        bundle: The original evaluation context used to prompt the LLM.
+        model_result: The parsed output from the LLM evaluation.
+
+    Returns:
+        A FinalEvaluationRecord ready to be persisted and presented to the recruiter.
+    """
 
     output = model_result.output
     authoritative_specs = {item.name: item for item in bundle.technical_skills}

@@ -8,7 +8,7 @@ import logging
 from typing import Any
 
 from src.control.agents.state import InterviewState
-from src.data.repositories import interview_session_repository
+from src.data.repositories.unit_of_work import InterviewUnitOfWork
 
 logger = logging.getLogger(__name__)
 _background_persistence_tasks: set[asyncio.Task[None]] = set()
@@ -22,26 +22,41 @@ async def persist_turn(
     transcript_items: list[dict[str, Any]],
     violations: list[dict[str, Any]],
 ) -> None:
-    """Persist an immutable snapshot; repository writes are idempotent."""
+    """
+    Persist an immutable snapshot of interview turns and violations to the database.
+    Repository writes are idempotent and protected by an asyncio lock per session.
+
+    Args:
+        session_id: The UUID of the interview session.
+        transcript_items: A list of dicts representing new turns (bot or candidate).
+        violations: A list of dicts representing detected proctoring violations.
+    """
 
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
+    async with lock, InterviewUnitOfWork() as unit_of_work:
         for item in transcript_items:
-            await interview_session_repository.append_transcript_turn(
+            await unit_of_work.interview_sessions.append_transcript_turn(
                 session_id,
                 item,
             )
         for violation in violations:
-            await interview_session_repository.append_violation(
+            await unit_of_work.interview_sessions.append_violation(
                 session_id,
                 violation,
             )
 
 
 async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
+    """
+    Update the official elapsed time of the interview in the database.
+
+    Args:
+        session_id: The UUID of the interview session.
+        elapsed_secs: The total elapsed seconds.
+    """
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
-        await interview_session_repository.update_elapsed_time(
+    async with lock, InterviewUnitOfWork() as unit_of_work:
+        await unit_of_work.interview_sessions.update_elapsed_time(
             session_id,
             elapsed_secs=elapsed_secs,
             total_pause_secs=0,
@@ -49,8 +64,22 @@ async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
 
 
 def _task_finished(task: asyncio.Task[None]) -> None:
+    """
+    Callback invoked when a background persistence task completes.
+    Removes the task from the tracking sets and logs any exceptions.
+
+    Args:
+        task: The asyncio task that finished.
+    """
     _background_persistence_tasks.discard(task)
-    _background_task_sessions.pop(task, None)
+    session_id = _background_task_sessions.pop(task, None)
+    if session_id and not any(
+        active_session_id == session_id
+        for active_session_id in _background_task_sessions.values()
+    ):
+        lock = _session_locks.get(session_id)
+        if lock is not None and not lock.locked():
+            _session_locks.pop(session_id, None)
     if task.cancelled():
         logger.warning("Background interview-turn persistence was cancelled")
         return
@@ -68,6 +97,14 @@ def _schedule(
     transcript_items: list[dict[str, Any]],
     violations: list[dict[str, Any]] | None = None,
 ) -> None:
+    """
+    Schedule a non-blocking persistence task to run in the background.
+
+    Args:
+        state: The current interview state.
+        transcript_items: Turns to persist.
+        violations: Proctoring violations to persist.
+    """
     if not transcript_items and not violations:
         return
     task = asyncio.create_task(
@@ -87,7 +124,14 @@ def schedule_elapsed_persistence(
     *,
     elapsed_secs: int,
 ) -> None:
-    """Persist timing off the graph response path."""
+    """
+    Schedule a background task to persist the elapsed interview time.
+    Keeps the database somewhat in sync without blocking the graph execution.
+
+    Args:
+        state: The current interview state.
+        elapsed_secs: Total time elapsed.
+    """
 
     task = asyncio.create_task(
         _persist_elapsed(
@@ -101,7 +145,15 @@ def schedule_elapsed_persistence(
 
 
 async def persist_bot_output(state: InterviewState) -> dict[str, Any]:
-    """Queue the latest bot utterance from LangGraph's active event loop."""
+    """
+    Graph node to queue the latest bot utterance for database persistence.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates clearing the pending bot turn.
+    """
 
     pending = state.get("pending_bot_turn")
     if pending:
@@ -112,7 +164,16 @@ async def persist_bot_output(state: InterviewState) -> dict[str, Any]:
 async def persist_candidate_output(
     state: InterviewState,
 ) -> dict[str, Any]:
-    """Queue candidate speech and violations from the active event loop."""
+    """
+    Graph node to queue candidate speech and violations for database persistence.
+    Also increments the global turn counter.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates clearing the pending candidate turn/violations and incrementing turn number.
+    """
 
     pending = state.get("pending_candidate_turn")
     violations = list(state.get("violations_to_persist") or [])
@@ -131,7 +192,13 @@ async def persist_candidate_output(
 async def drain_background_persistence(
     session_id: str | None = None,
 ) -> None:
-    """Flush scheduled writes during graceful service shutdown."""
+    """
+    Flush scheduled database writes during graceful service shutdown or room closure.
+
+    Args:
+        session_id: If provided, waits only for tasks belonging to this session.
+            If None, waits for all active persistence tasks globally.
+    """
 
     tasks = [
         task

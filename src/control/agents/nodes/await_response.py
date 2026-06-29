@@ -12,6 +12,15 @@ from src.utils.interview_graph import utc_now_iso
 
 
 def _normalize_event(raw: Any) -> dict[str, Any]:
+    """
+    Ensure the incoming raw event from LiveKit is formatted as a consistent dictionary.
+
+    Args:
+        raw: The raw event which may be a string (like "__SILENCE__") or a dict.
+
+    Returns:
+        A normalized dictionary with at least an 'event_type' and 'text'.
+    """
     if isinstance(raw, str):
         if raw == "__SILENCE__":
             return {
@@ -27,7 +36,19 @@ def _normalize_event(raw: Any) -> dict[str, Any]:
 
 
 def await_candidate_response(state: InterviewState) -> dict[str, Any]:
-    """Pause after bot playout; the bridge resumes this node with a LiveKit event."""
+    """
+    Pause execution of the LangGraph state machine and yield control back to LiveKit.
+
+    The node triggers a LangGraph `interrupt`. It stays suspended until the
+    LiveKit agent invokes the graph again with a resume payload (like a speech
+    transcript or a timeout event).
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the parsed candidate event and the next action route.
+    """
 
     raw = interrupt(
         {

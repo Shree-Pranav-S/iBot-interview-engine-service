@@ -23,10 +23,7 @@ from src.core.services.candidate_session_service import CandidateSessionService
 from src.core.services.event_log_service import (
     try_record_event_in_background,
 )
-from src.data.repositories import (
-    assessment_context_repository,
-    interview_session_repository,
-)
+from src.data.repositories.unit_of_work import InterviewUnitOfWork
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.utils.interview_graph import utc_now_iso
 
@@ -55,27 +52,49 @@ class LiveKitInterviewBridge:
 
     @staticmethod
     def _is_terminal(state: dict[str, Any]) -> bool:
+        """
+        Check if the interview state represents a terminal session status.
+
+        Args:
+            state: The current interview state dictionary.
+
+        Returns:
+            True if the session is completed, terminated, deactivated, or evaluated.
+        """
         return str(state.get("session_status") or "").upper() in TERMINAL_STATUSES
 
     async def _checkpoint_state(self) -> dict[str, Any]:
+        """
+        Retrieve the latest state snapshot from the LangGraph checkpointer.
+
+        Returns:
+            The raw dictionary state from the latest checkpoint, or an empty dict.
+        """
         graph = await get_graph()
         snapshot = await graph.aget_state(self._config)
         values = getattr(snapshot, "values", None)
         return dict(values or {})
 
     async def start_or_resume(self) -> str:
-        """Initialize context and opening, or restore the current spoken prompt."""
+        """
+        Initialize context and opening, or restore the current spoken prompt.
+        This handles both brand new interviews and recovering from disconnects.
+
+        Returns:
+            The text the bot should say to resume or start the conversation.
+        """
 
         graph = await get_graph()
         existing = await self._checkpoint_state()
         if existing:
             self.state = existing
-            context = await assessment_context_repository.load_interview_context(
-                self.candidate_assessment_id
-            )
-            session = await interview_session_repository.get_session_by_candidate_assessment_id(
-                self.candidate_assessment_id
-            )
+            async with InterviewUnitOfWork() as unit_of_work:
+                context = await unit_of_work.assessment_context.load_interview_context(
+                    self.candidate_assessment_id,
+                )
+                session = await unit_of_work.interview_sessions.get_session_by_candidate_assessment_id(
+                    self.candidate_assessment_id,
+                )
             self._elapsed_before_connection_secs = max(
                 0,
                 int(session.get("total_elapsed_secs") or 0),
@@ -98,19 +117,31 @@ class LiveKitInterviewBridge:
         return str(self.state.get("bot_reply_text") or "").strip()
 
     async def start_timer(self) -> bool:
-        """Persist the timer only when LiveKit says first bot playout has begun."""
+        """
+        Persist the timer only when LiveKit says first bot playout has begun.
+        This ensures the candidate's timer doesn't run while they are loading.
+
+        Returns:
+            True if the timer was successfully started now, False if already started.
+        """
 
         if self.state and self.state.get("timer_started"):
             return False
 
-        started_at = await assessment_context_repository.mark_candidate_timer_started(
-            self.candidate_assessment_id
-        )
+        session_id = str((self.state or {}).get("interview_session_id") or "")
+        async with InterviewUnitOfWork() as unit_of_work:
+            started_at = (
+                await unit_of_work.assessment_context.mark_candidate_timer_started(
+                    self.candidate_assessment_id,
+                )
+            )
+            if session_id:
+                await unit_of_work.interview_sessions.mark_session_in_progress(
+                    session_id,
+                )
         self._timer_started_monotonic = time.monotonic()
         self._timer_started_at = started_at
-        session_id = str((self.state or {}).get("interview_session_id") or "")
         if session_id:
-            await interview_session_repository.mark_session_in_progress(session_id)
             await try_record_event_in_background(
                 EventLogCreate(
                     event_name=EventName.INTERVIEW_STARTED,
@@ -134,7 +165,13 @@ class LiveKitInterviewBridge:
         return True
 
     def elapsed_secs(self) -> int:
-        """Return official elapsed interview time without starting the clock."""
+        """
+        Return official elapsed interview time without starting the clock.
+        Accounts for time across multiple reconnects.
+
+        Returns:
+            The total elapsed time in seconds.
+        """
 
         if self._timer_started_monotonic is not None:
             return max(
@@ -145,7 +182,13 @@ class LiveKitInterviewBridge:
         return max(0, int((self.state or {}).get("elapsed_secs") or 0))
 
     def seconds_until_section_barge_in(self) -> float | None:
-        """Return delay to the grace deadline without stealing later sections."""
+        """
+        Return delay to the grace deadline without stealing later sections.
+        This is used to determine when the agent should forcefully move on.
+
+        Returns:
+            The number of seconds until a barge-in should occur, or None if inapplicable.
+        """
 
         state = self.state or {}
         if (
@@ -165,6 +208,12 @@ class LiveKitInterviewBridge:
         return max(0.0, float(deadline_elapsed - self.elapsed_secs()))
 
     def _merge_result(self, result: Any) -> None:
+        """
+        Merge the new LangGraph state result with local timer properties.
+
+        Args:
+            result: The new state dictionary returned by LangGraph.
+        """
         previous = self.state or {}
         timer_state = {
             "timer_started": bool(previous.get("timer_started")),
@@ -179,7 +228,19 @@ class LiveKitInterviewBridge:
         stt_confidence: float | None = None,
         duration_ms: int | None = None,
     ) -> str:
-        """Resume the pending graph interrupt with one final speech transcript."""
+        """
+        Resume the pending graph interrupt with one final speech transcript.
+        This triggers a state machine transition to evaluate the response and
+        generate the next question.
+
+        Args:
+            text: The candidate's spoken response.
+            stt_confidence: The confidence score from the STT provider.
+            duration_ms: How long the candidate spoke.
+
+        Returns:
+            The text for the bot to speak in reply.
+        """
 
         if self.state is None:
             await self.start_or_resume()
@@ -205,7 +266,13 @@ class LiveKitInterviewBridge:
         return str(self.state.get("bot_reply_text") or "").strip()
 
     async def submit_silence(self) -> str:
-        """Resume with LiveKit's five-second no-speech event; no LLM is called."""
+        """
+        Resume with LiveKit's five-second no-speech event; no LLM is called.
+        This allows the graph to naturally handle candidate silence.
+
+        Returns:
+            The text for the bot to speak to prompt the candidate.
+        """
 
         if self.state is None:
             await self.start_or_resume()
@@ -232,7 +299,16 @@ class LiveKitInterviewBridge:
         *,
         partial_candidate_text: str = "",
     ) -> str:
-        """Force the pending graph interrupt to leave an overrun section."""
+        """
+        Force the pending graph interrupt to leave an overrun section.
+        This is triggered when the candidate takes too long on a section.
+
+        Args:
+            partial_candidate_text: Whatever text the candidate had spoken so far.
+
+        Returns:
+            The text for the bot to speak (usually a transition to the next section).
+        """
 
         if self.state is None:
             await self.start_or_resume()
@@ -254,20 +330,24 @@ class LiveKitInterviewBridge:
         return str(self.state.get("bot_reply_text") or "").strip()
 
     async def finalize_closing(self) -> None:
-        """Complete durable lifecycle after closing audio has finished."""
+        """
+        Complete durable lifecycle after closing audio has finished.
+        This marks the session completed and triggers downstream tasks like evaluation.
+        """
 
         state = self.state or {}
         session_id = str(state.get("interview_session_id") or "")
         elapsed = self.elapsed_secs()
         await drain_background_persistence(session_id or None)
-        if session_id:
-            await interview_session_repository.complete_session(
-                session_id,
-                total_elapsed_secs=elapsed,
+        async with InterviewUnitOfWork() as unit_of_work:
+            if session_id:
+                await unit_of_work.interview_sessions.complete_session(
+                    session_id,
+                    total_elapsed_secs=elapsed,
+                )
+            await unit_of_work.assessment_context.mark_candidate_completed(
+                self.candidate_assessment_id,
             )
-        await assessment_context_repository.mark_candidate_completed(
-            self.candidate_assessment_id
-        )
         state.update(
             {
                 "session_status": "COMPLETED",
@@ -303,7 +383,12 @@ class LiveKitInterviewBridge:
         )
 
     async def record_disconnect(self, reason: str) -> None:
-        """Record an unexpected LiveKit drop under the bounded reconnect policy."""
+        """
+        Record an unexpected LiveKit drop under the bounded reconnect policy.
+
+        Args:
+            reason: The disconnect reason code.
+        """
 
         state = self.state or {}
         if (
@@ -328,30 +413,3 @@ class LiveKitInterviewBridge:
             reason=reason,
             elapsed_secs=self.elapsed_secs(),
         )
-
-    async def close(self, *, terminated: bool = False) -> str:
-        """Finalize or terminate the active interview lifecycle."""
-
-        if self.state is None:
-            self.state = {}
-        if terminated:
-            self.state["session_status"] = "TERMINATED"
-            session_id = str(self.state.get("interview_session_id") or "")
-            elapsed = self.elapsed_secs()
-            await try_record_event_in_background(
-                EventLogCreate(
-                    event_name=EventName.INTERVIEW_ENDED,
-                    source_service=EventSource.INTERVIEW_ENGINE,
-                    correlation_id=(session_id or self.candidate_assessment_id),
-                    candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
-                    metadata={
-                        "end_reason": "terminated",
-                        "session_status": "TERMINATED",
-                        "elapsed_secs": elapsed,
-                    },
-                    duration_ms=elapsed * 1000,
-                )
-            )
-        else:
-            await self.finalize_closing()
-        return ""

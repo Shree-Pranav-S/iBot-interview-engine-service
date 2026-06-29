@@ -27,7 +27,7 @@ from livekit.agents import (
     inference,
     llm,
 )
-from livekit.plugins import deepgram, silero
+from livekit.plugins import deepgram
 
 from src.config.settings import settings
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
@@ -57,8 +57,15 @@ DEMO_RESPONSE_TEMPLATES = (
 
 
 def prewarm(proc: agents.JobProcess) -> None:
-    """Load expensive models once per worker process."""
-    proc.userdata["vad"] = silero.VAD.load(
+    """
+    Load expensive AI models into memory once per worker process.
+    This ensures models like Silero VAD are ready before any interviews start.
+
+    Args:
+        proc: The JobProcess instance from LiveKit.
+    """
+    proc.userdata["vad"] = inference.VAD(
+        model="silero",
         min_speech_duration=0.3,
         min_silence_duration=0.5,
         prefix_padding_duration=0.2,
@@ -73,15 +80,27 @@ server = AgentServer(
 )
 
 
-class LangGraphPipelineLLM(llm.LLM):  # type: ignore[misc]
-    """Placeholder LLM required for the AgentSession voice pipeline.
+async def _stream_text_chunks(
+    text: str,
+    *,
+    max_chars: int = 96,
+) -> AsyncIterable[str]:
+    """Yield punctuation-aware chunks to the TTS pipeline."""
 
-    The actual response generation happens in InterviewLiveKitAgent.llm_node.
-    """
+    for chunk in chunk_for_tts(text, max_chars=max_chars):
+        yield chunk
+
+
+class InternalPipelineLLM(llm.LLM):  # type: ignore[misc]
+    """Required LiveKit adapter for agents with custom response nodes."""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__()
+        self._model_name = model_name
 
     @property
     def model(self) -> str:
-        return "langgraph-interview"
+        return self._model_name
 
     @property
     def provider(self) -> str:
@@ -97,33 +116,13 @@ class LangGraphPipelineLLM(llm.LLM):  # type: ignore[misc]
         tool_choice: Any = agents.NOT_GIVEN,
         extra_kwargs: Any = agents.NOT_GIVEN,
     ) -> llm.LLMStream:
-        raise RuntimeError("LangGraphPipelineLLM is only used with a custom llm_node")
+        """
+        Reject the fallback provider path.
 
-
-class StaticDemoPipelineLLM(llm.LLM):  # type: ignore[misc]
-    """Non-provider placeholder that makes external LLM usage impossible."""
-
-    @property
-    def model(self) -> str:
-        return "static-demo-templates"
-
-    @property
-    def provider(self) -> str:
-        return "internal"
-
-    def chat(
-        self,
-        *,
-        chat_ctx: llm.ChatContext,
-        tools: list[llm.Tool] | None = None,
-        conn_options: Any = agents.DEFAULT_API_CONNECT_OPTIONS,
-        parallel_tool_calls: Any = agents.NOT_GIVEN,
-        tool_choice: Any = agents.NOT_GIVEN,
-        extra_kwargs: Any = agents.NOT_GIVEN,
-    ) -> llm.LLMStream:
-        raise RuntimeError(
-            "The demo agent only supports its static custom response node"
-        )
+        Raises:
+            RuntimeError: Always, because the agent implements ``llm_node``.
+        """
+        raise RuntimeError("This agent only supports its custom response node")
 
 
 class DemoLiveKitAgent(Agent):  # type: ignore[misc]
@@ -132,20 +131,19 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
     def __init__(self) -> None:
         super().__init__(
             instructions="Static no-LLM demo interview agent.",
-            llm=StaticDemoPipelineLLM(),
+            llm=InternalPipelineLLM("static-demo-templates"),
         )
         self._response_pending = False
         self._last_response_index: int | None = None
 
-    async def _stream_text_chunks(self, text: str) -> AsyncIterable[str]:
-        for chunk in chunk_for_tts(text, max_chars=96):
-            yield chunk
-
     async def on_enter(self) -> None:
-        """Speak the fixed welcome after the LiveKit speech pipeline is ready."""
+        """
+        Speak the fixed welcome message when the LiveKit session connects.
+        This allows the user to know the demo room is active.
+        """
 
         handle = self.session.say(
-            self._stream_text_chunks(DEMO_GREETING),
+            _stream_text_chunks(DEMO_GREETING),
             allow_interruptions=True,
             add_to_chat_ctx=True,
         )
@@ -156,7 +154,17 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
         turn_ctx: ChatContext,
         new_message: ChatMessage,
     ) -> None:
-        """Accept any detected non-empty candidate turn without classifying it."""
+        """
+        Accept any non-empty speech from the candidate. This signals that the demo
+        agent needs to formulate a response.
+
+        Args:
+            turn_ctx: The context of the ongoing chat.
+            new_message: The finalized message transcribed from the user's speech.
+
+        Raises:
+            StopResponse: If the text is empty.
+        """
 
         candidate_text = " ".join((new_message.text_content or "").split())
         if not candidate_text:
@@ -164,6 +172,12 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
         self._response_pending = True
 
     def _choose_response(self) -> str:
+        """
+        Select a random demo response template, avoiding repeating the previous one.
+
+        Returns:
+            The selected response text.
+        """
         available_indices = [
             index
             for index in range(len(DEMO_RESPONSE_TEMPLATES))
@@ -179,7 +193,18 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
         tools: list[llm.Tool],
         model_settings: ModelSettings,
     ) -> AsyncIterable[str]:
-        """Yield one random static response; no provider client is reachable."""
+        """
+        Provide the response for the demo agent. This yields a static phrase
+        instead of calling out to a real LLM.
+
+        Args:
+            chat_ctx: The ongoing chat context.
+            tools: Tools available (unused here).
+            model_settings: Model configuration (unused here).
+
+        Yields:
+            String chunks for the TTS engine.
+        """
 
         if not self._response_pending:
             return
@@ -199,8 +224,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         connection_id: str,
     ) -> None:
         super().__init__(
-            instructions=("placeholder"),
-            llm=LangGraphPipelineLLM(),
+            instructions="Conduct the interview through the LangGraph workflow.",
+            llm=InternalPipelineLLM("langgraph-interview"),
         )
 
         self.bridge = LiveKitInterviewBridge(
@@ -231,6 +256,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._turn_lock = asyncio.Lock()
 
     def _mark_closed_from_state(self) -> bool:
+        """
+        Check the interview state from the bridge to determine if the interview is closed.
+
+        Returns:
+            True if the interview has completed or is closing, False otherwise.
+        """
         state = self.bridge.state or {}
         self._interview_closed = bool(
             state.get("closing_done")
@@ -240,6 +271,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         return self._interview_closed
 
     async def _finalize_after_closing(self) -> None:
+        """
+        Finalize the interview process once the closing audio has finished playing.
+        This disables audio input and triggers the bridge to save final data.
+        """
         if self._closing_finalize_requested:
             return
         self._closing_finalize_requested = True
@@ -338,10 +373,6 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             self._delayed_silence_check(delay_secs)
         )
 
-    async def _stream_text_chunks(self, text: str) -> AsyncIterable[str]:
-        for chunk in chunk_for_tts(text, max_chars=96):
-            yield chunk
-
     async def _say_text(
         self,
         text: str,
@@ -352,7 +383,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._cancel_pending_silence()
         self._agent_is_speaking = True
         handle = self.session.say(
-            self._stream_text_chunks(text),
+            _stream_text_chunks(text),
             allow_interruptions=allow_interruptions,
             add_to_chat_ctx=add_to_chat_ctx,
         )
@@ -360,7 +391,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._mark_agent_speech_finished()
 
     def track_agent_state(self, new_state: str) -> None:
-        """Track agent speech so user-away silence starts after bot audio ends."""
+        """
+        Track agent speech so user-away silence and timers start after bot audio ends.
+
+        Args:
+            new_state: The new state of the agent ('speaking', 'listening', etc.).
+        """
 
         if new_state == "speaking":
             self._cancel_pending_silence()
@@ -384,7 +420,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 self._schedule_section_barge_watchdog()
 
     async def on_enter(self) -> None:
-        """Start or resume the interview and speak the opening graph turn."""
+        """
+        Start or resume the interview and speak the opening graph turn.
+        This executes when the LiveKit session is fully established.
+        """
 
         try:
             opening_text = await self.bridge.start_or_resume()
@@ -416,7 +455,13 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             await self._finalize_after_closing()
 
     def track_user_state(self, new_state: str) -> None:
-        """Record user speech duration for optional graph/timing metadata."""
+        """
+        Record user speech duration for optional graph/timing metadata and handle
+        the transition out of silence.
+
+        Args:
+            new_state: The new state of the user ('speaking', 'listening', etc.).
+        """
 
         if new_state == "speaking":
             self._cancel_pending_silence()
@@ -440,7 +485,13 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._last_user_turn_finished_at = time.monotonic()
 
     def track_user_transcription(self, text: str, *, is_final: bool) -> None:
-        """Accumulate final STT chunks and retain the latest interim suffix."""
+        """
+        Accumulate final STT chunks and retain the latest interim suffix.
+
+        Args:
+            text: The text transcribed so far in the chunk.
+            is_final: Whether this chunk represents a completed, finalized phrase.
+        """
 
         normalized = " ".join((text or "").split())
         if is_final:
@@ -481,7 +532,16 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         turn_ctx: ChatContext,
         new_message: ChatMessage,
     ) -> None:
-        """Capture only LiveKit-confirmed user turns for graph submission."""
+        """
+        Capture only LiveKit-confirmed user turns for graph submission.
+
+        Args:
+            turn_ctx: The context of the ongoing chat.
+            new_message: The finalized message transcribed from the user's speech.
+
+        Raises:
+            StopResponse: If the turn is discarded or the interview is closed.
+        """
 
         if self._interview_closed:
             raise StopResponse()
@@ -506,7 +566,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._cancel_pending_silence()
 
     async def handle_user_away(self) -> None:
-        """Recover buffered speech, or submit silence when no speech exists."""
+        """
+        Recover buffered speech, or submit silence when no speech exists, to move
+        the graph forward if the user has been silent for too long.
+        """
 
         if self._interview_closed:
             return
@@ -613,7 +676,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             await self._finalize_after_closing()
 
     async def handle_session_close(self, reason: str) -> None:
-        """Persist unexpected room closure without affecting LiveKit teardown."""
+        """
+        Persist unexpected room closure without affecting LiveKit teardown.
+
+        Args:
+            reason: The reason for closure provided by LiveKit.
+        """
 
         try:
             await self.bridge.record_disconnect(reason)
@@ -626,7 +694,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
 
     async def handle_section_time_barge_in(self) -> None:
-        """Interrupt an overrun section, including during candidate speech."""
+        """
+        Interrupt an overrun section, including during candidate speech, to force
+        the interview to progress to the next phase on schedule.
+        """
 
         if self._interview_closed or self._barge_in_active:
             return
@@ -642,7 +713,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._discard_inflight_user_turn = self._user_turn_started_at is not None
         self._cancel_pending_silence()
         try:
-            self.session.input.set_audio_enabled(False)
+            try:
+                self.session.input.set_audio_enabled(False)
+            except RuntimeError:
+                # Agent is no longer running, abort barge-in
+                return
+
             async with self._turn_lock:
                 remaining = self.bridge.seconds_until_section_barge_in()
                 if remaining is None or remaining > 0.1:
@@ -680,7 +756,18 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         tools: list[llm.Tool],
         model_settings: ModelSettings,
     ) -> AsyncIterable[str]:
-        """Generate assistant text by resuming the existing LangGraph workflow."""
+        """
+        Generate assistant text by resuming the existing LangGraph workflow with
+        the candidate's transcribed speech.
+
+        Args:
+            chat_ctx: The chat context (unused directly).
+            tools: Tools available (unused).
+            model_settings: Model settings (unused).
+
+        Yields:
+            Text chunks for the TTS engine.
+        """
 
         candidate_text = self._pending_user_text
         duration_ms = self._pending_duration_ms
@@ -725,7 +812,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
 
 async def request_fnc(req: agents.JobRequest) -> None:
-    """Accept explicitly dispatched interview-agent jobs."""
+    """
+    Accept explicitly dispatched interview-agent jobs.
+
+    Args:
+        req: The incoming job request from LiveKit.
+    """
 
     await req.accept(
         name="AI Interview Bot",
@@ -738,7 +830,16 @@ async def request_fnc(req: agents.JobRequest) -> None:
     on_request=request_fnc,
 )
 async def interview_agent(ctx: agents.JobContext) -> None:
-    """LiveKit room entrypoint for a candidate interview session."""
+    """
+    LiveKit room entrypoint for a candidate interview session.
+    Configures the agent with STT/TTS settings and starts the event loop.
+
+    Args:
+        ctx: The LiveKit job context.
+
+    Raises:
+        RuntimeError: If critical metadata is missing from the job.
+    """
 
     metadata = json.loads(ctx.job.metadata or "{}")
     candidate_assessment_id = metadata.get("candidate_assessment_id")
@@ -755,7 +856,7 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             "Missing interview session connection metadata in LiveKit job"
         )
 
-    session = AgentSession(
+    session: AgentSession = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=deepgram.STT(
             model=settings.DEEPGRAM_STT_MODEL or "nova-3",
@@ -770,7 +871,7 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         ),
         tts=deepgram.TTS(
             model=settings.DEEPGRAM_TTS_MODEL or "aura-2-andromeda-en",
-            api_key=settings.DEEPGRAM_API_KEY or agents.NOT_GIVEN,
+            api_key=settings.DEEPGRAM_API_KEY or None,
         ),
         turn_handling=TurnHandlingOptions(
             turn_detection=inference.TurnDetector(

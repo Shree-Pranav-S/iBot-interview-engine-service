@@ -1,5 +1,4 @@
 import logging
-from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -46,17 +45,6 @@ async def get_session_factory() -> async_sessionmaker[AsyncSession]:
         autoflush=False,
         expire_on_commit=False,
     )
-
-
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    SessionLocal = await get_session_factory()
-    async with SessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
 
 
 async def init_db() -> None:

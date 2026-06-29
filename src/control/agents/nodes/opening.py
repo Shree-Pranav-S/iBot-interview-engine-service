@@ -10,7 +10,20 @@ from src.control.agents.templates import choose_template
 
 
 def deliver_opening(state: InterviewState) -> dict[str, Any]:
-    """Select one of ten openings without starting the interview timer."""
+    """
+    Select one of ten openings without starting the interview timer.
+
+    This node generates the initial greeting and the very first question (typically
+    a self-introduction) for the candidate. The timer is NOT started here; the
+    LiveKit bridge starts the timer only once this audio actually begins playing
+    on the client side.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the opening bot turn and the next routing action.
+    """
 
     text = choose_template(
         "opening",

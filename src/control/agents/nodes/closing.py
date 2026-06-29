@@ -10,7 +10,18 @@ from src.control.agents.templates import choose_template
 
 
 def generate_closing_message(state: InterviewState) -> dict[str, Any]:
-    """Create one of ten stable closing messages for LiveKit playout."""
+    """
+    Create one of ten stable closing messages for LiveKit playout and finalize graph state.
+
+    This node transitions the interview to the CLOSING state. The resulting text is
+    spoken by the bot, after which the LiveKit bridge triggers teardown.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the closing bot turn and terminal routing keys.
+    """
 
     text = choose_template(
         "closing",

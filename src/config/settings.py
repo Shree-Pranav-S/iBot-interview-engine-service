@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Environment-backed service configuration."""
+
     model_config = SettingsConfigDict(
         env_file=(".env",),
         env_file_encoding="utf-8",
@@ -18,56 +20,43 @@ class Settings(BaseSettings):
     APP_NAME: str = "interview-engine-service"
     APP_ENV: str = Field(default="development")
 
-    # â”€â”€ Deepgram (STT + TTS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Deepgram speech services.
     DEEPGRAM_API_KEY: str = Field(default="")
     DEEPGRAM_STT_MODEL: str = Field(default="nova-3")
     DEEPGRAM_TTS_MODEL: str = Field(default="aura-2-andromeda-en")
-    DEEPGRAM_KEYTERMS: str = Field(
-        default=(
-            "FastAPI,LangGraph,React,TypeScript,PostgreSQL,Redis,Docker,"
-            "Kubernetes,WebSocket,Deepgram,LiveKit,JWT,OAuth,Alembic,SQLAlchemy"
-        )
-    )
 
+    # Groq models used by latency-sensitive graph nodes.
     GROQ_API_KEY: str = Field(default="")
     FALLBACK_GROQ_API_KEY: str = Field(default="")
     GROQ_EVALUATION_API_KEY: str = Field(default="")
     GROQ_QUESTION_API_KEY: str = Field(default="")
-    GROQ_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_MAX_TOKENS: int = Field(default=400)
-    GROQ_TEMPERATURE: float = Field(default=0.3)
-
-    # Higher-capability model for nuanced, non-repeating interview questions.
-    GROQ_QUESTION_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_QUESTION_MAX_TOKENS: int = Field(default=384)
-    GROQ_QUESTION_TEMPERATURE: float = Field(default=0.4)
+    GROQ_QUESTION_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    GROQ_QUESTION_MAX_TOKENS: int = Field(default=256)
+    GROQ_QUESTION_TEMPERATURE: float = Field(default=0.15)
     GROQ_QUESTION_TIMEOUT_SECS: float = Field(default=15.0)
-
-    # â”€â”€ Groq Evaluation Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # Fast live technical answer evaluation.
     GROQ_LIVE_EVAL_MODEL: str = Field(default="llama-3.1-8b-instant")
     GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=256)
     GROQ_LIVE_EVAL_TEMPERATURE: float = Field(default=0.0)
-
-    # â”€â”€ Groq Classification Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")
     GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=256)
     GROQ_CLASSIFY_TEMPERATURE: float = Field(default=0.0)
 
     # NVIDIA NIM one-shot holistic evaluation.
     NVIDIA_NIM_API_KEY: str = Field(default="")
-    NVIDIA_NIM_BASE_URL: str = Field(default="https://integrate.api.nvidia.com/v1")
-    NVIDIA_NIM_MODEL: str = Field(default="deepseek-ai/deepseek-v4-pro")
-    # NVIDIA currently accepts none/high/max for DeepSeek V4 Pro. "high"
-    # preserves careful reasoning without the latency of the maximum mode.
-    NVIDIA_NIM_REASONING_EFFORT: str = Field(default="high")
-    NVIDIA_NIM_TEMPERATURE: float = Field(default=0.2)
-    NVIDIA_NIM_MAX_TOKENS: int = Field(default=8192)
+    NVIDIA_NIM_BASE_URL: str = Field(
+        default="https://integrate.api.nvidia.com/v1",
+    )
+    NVIDIA_NIM_MODEL: str = Field(
+        default="nvidia/nemotron-3-ultra-550b-a55b",
+    )
+    NVIDIA_NIM_TEMPERATURE: float = Field(default=1.0)
+    NVIDIA_NIM_TOP_P: float = Field(default=0.95)
+    NVIDIA_NIM_MAX_TOKENS: int = Field(default=16384)
+    NVIDIA_NIM_REASONING_BUDGET: int = Field(default=16384)
     NVIDIA_NIM_TIMEOUT_SECS: float = Field(default=600.0)
     NVIDIA_NIM_STREAM: bool = Field(default=True)
 
-    # â”€â”€ Livekit (Real-time Communication) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+    # LiveKit real-time communication.
     LIVEKIT_URL: str = Field(default="")
     LIVEKIT_API_KEY: str = Field(default="")
     LIVEKIT_API_SECRET: str = Field(default="")
@@ -100,6 +89,8 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
+        """Build the escaped async PostgreSQL connection URL."""
+
         return (
             f"postgresql+asyncpg://{quote_plus(self.POSTGRES_USER)}"
             f":{quote_plus(self.POSTGRES_PASSWORD)}"
@@ -108,20 +99,28 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
+        """Build the escaped Redis connection URL."""
+
         password = f":{quote_plus(self.REDIS_PASSWORD)}@" if self.REDIS_PASSWORD else ""
         return f"redis://{password}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     @property
     def celery_broker_url(self) -> str:
+        """Return the explicit Celery broker or the shared Redis URL."""
+
         return self.CELERY_BROKER_URL or self.REDIS_URL
 
     @property
     def celery_result_backend(self) -> str:
+        """Return the explicit result backend or the shared Redis URL."""
+
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Load settings once per process."""
+
     return Settings()
 
 

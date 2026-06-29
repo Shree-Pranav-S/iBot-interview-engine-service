@@ -13,7 +13,6 @@ ClarificationType = Literal[
     "time_to_think",
     "decline_think_time",
 ]
-AnswerStrength = Literal["weak", "adequate", "strong"]
 Difficulty = Literal["easy", "medium", "hard"]
 SilenceStage = Literal[
     "none",
@@ -29,11 +28,8 @@ class InterviewState(TypedDict, total=False):
     # Identity and prerequisite context.
     candidate_assessment_id: str
     interview_session_id: str
-    thread_id: str
     candidate_name: str
     company_name: str
-    role_name: str
-    interview_plan: dict[str, Any]
     resume_context: dict[str, Any]
     inferred_difficulty: str
     runtime_sections: list[dict[str, Any]]
@@ -53,9 +49,6 @@ class InterviewState(TypedDict, total=False):
     last_rephrased_question: str | None
     current_question_difficulty: Difficulty | None
     is_self_introduction: bool
-    previous_question_text: str | None
-    previous_question_difficulty: Difficulty | None
-    previous_evaluation: dict[str, Any] | None
 
     # LiveKit input for the current turn.
     candidate_event: dict[str, Any] | str | None
@@ -69,8 +62,6 @@ class InterviewState(TypedDict, total=False):
     last_response_substantial: bool | None
     latest_evaluation: dict[str, Any] | None
     evaluation_source: str | None
-    last_evaluated_at: str | None
-    last_answer_strength: AnswerStrength | None
 
     # Question history and deterministic adaptation.
     asked_questions: list[dict[str, Any]]
@@ -99,7 +90,6 @@ class InterviewState(TypedDict, total=False):
     recent_violations: list[dict[str, Any]]
 
     # Total and section timing.
-    interview_duration_mins: int
     total_duration_secs: int
     elapsed_secs: int
     remaining_secs: int

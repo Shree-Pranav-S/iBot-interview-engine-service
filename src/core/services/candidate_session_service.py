@@ -5,15 +5,13 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.core.exceptions import AuthenticationException, ForbiddenException
-from src.data.clients.postgres_client import get_session_factory
-from src.data.repositories.candidate_session_repository import (
-    CandidateSessionRepository,
-)
 from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.unit_of_work import InterviewUnitOfWork
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.schemas.livekit import (
     CandidateConnectionContext,
@@ -55,6 +53,12 @@ def _sections_overview(context: dict[str, Any]) -> list[str]:
 
 class CandidateSessionService:
     """Own invitation consumption, session authentication, and reconnect rules."""
+
+    def __init__(
+        self,
+        unit_of_work_factory: Callable[[], InterviewUnitOfWork] = InterviewUnitOfWork,
+    ) -> None:
+        self._unit_of_work_factory = unit_of_work_factory
 
     @staticmethod
     async def _record(
@@ -110,10 +114,9 @@ class CandidateSessionService:
 
         rejection: Exception | None = None
         response: CandidateSessionBootstrapResponse | None = None
-        session_factory = await get_session_factory()
-        async with session_factory() as db_session, db_session.begin():
-            repository = CandidateSessionRepository(db_session)
-            event_repository = EventLogsRepository(db_session)
+        async with self._unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.candidate_sessions
+            event_repository = unit_of_work.event_logs
             context = await repository.lock_invitation_context(invitation_token)
 
             if not context:
@@ -242,9 +245,8 @@ class CandidateSessionService:
 
         rejection: Exception | None = None
         response: CandidateSessionBootstrapResponse | None = None
-        session_factory = await get_session_factory()
-        async with session_factory() as db_session, db_session.begin():
-            repository = CandidateSessionRepository(db_session)
+        async with self._unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.candidate_sessions
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
             if rejection is None:
@@ -291,10 +293,9 @@ class CandidateSessionService:
 
         rejection: Exception | None = None
         response: CandidateConnectionContext | None = None
-        session_factory = await get_session_factory()
-        async with session_factory() as db_session, db_session.begin():
-            repository = CandidateSessionRepository(db_session)
-            event_repository = EventLogsRepository(db_session)
+        async with self._unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.candidate_sessions
+            event_repository = unit_of_work.event_logs
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
 
@@ -363,12 +364,18 @@ class CandidateSessionService:
                         )
 
                 if rejection is None:
-                    # Reuse the connection generation while the same LiveKit
-                    # room/job is active. A recorded DISCONNECTED transition
-                    # clears it, so a genuine recovery receives a new value and
-                    # any late close callback from the old job becomes harmless.
-                    connection_id = str(
-                        context.get("active_connection_id") or uuid.uuid4().hex
+                    # A new token request for an in-progress interview replaces
+                    # the browser/agent connection even if the old LiveKit close
+                    # callback has not reached us yet. Rotating the generation
+                    # makes that eventual callback stale and lets the token
+                    # service explicitly dispatch a fresh agent immediately.
+                    active_connection_id = str(
+                        context.get("active_connection_id") or ""
+                    )
+                    connection_id = (
+                        uuid.uuid4().hex
+                        if session_status == "IN_PROGRESS"
+                        else active_connection_id or uuid.uuid4().hex
                     )
                     await repository.bind_active_connection(
                         context["session_id"],
@@ -387,6 +394,13 @@ class CandidateSessionService:
                             context["session_token_expires_at"]
                         )
                         or now,
+                        elapsed_secs=max(
+                            0,
+                            int(context.get("total_elapsed_secs") or 0),
+                        ),
+                        interview_started=(
+                            context.get("interview_started_at") is not None
+                        ),
                     )
 
         if rejection is not None:
@@ -403,9 +417,8 @@ class CandidateSessionService:
 
         rejection: Exception | None = None
         context: dict[str, Any] = {}
-        session_factory = await get_session_factory()
-        async with session_factory() as db_session, db_session.begin():
-            repository = CandidateSessionRepository(db_session)
+        async with self._unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.candidate_sessions
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
             if (
@@ -433,10 +446,9 @@ class CandidateSessionService:
 
         reconnect_deadline = _utc_now() + RECONNECT_WINDOW
         outcome: dict[str, Any] = {}
-        session_factory = await get_session_factory()
-        async with session_factory() as db_session, db_session.begin():
-            repository = CandidateSessionRepository(db_session)
-            event_repository = EventLogsRepository(db_session)
+        async with self._unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.candidate_sessions
+            event_repository = unit_of_work.event_logs
             outcome = await repository.record_disconnect(
                 session_id,
                 connection_id=connection_id,

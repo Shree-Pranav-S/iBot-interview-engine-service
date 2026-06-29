@@ -16,6 +16,15 @@ SECTION_BARGE_IN_GRACE_SECS = 30
 
 
 def _elapsed_from_event(state: InterviewState) -> int:
+    """
+    Determine the total elapsed time using the timestamp embedded in the latest event.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        The elapsed time in seconds.
+    """
     event = state.get("candidate_event")
     if isinstance(event, dict) and event.get("elapsed_secs") is not None:
         try:
@@ -48,7 +57,7 @@ def section_transition_deadline_elapsed(
     *,
     grace_secs: int = 0,
 ) -> int:
-    """Return the section deadline without consuming future allocations."""
+    """Return the section deadline, including any requested overrun grace."""
 
     grace = max(0, int(grace_secs))
     section_started = max(
@@ -63,7 +72,7 @@ def section_transition_deadline_elapsed(
     total_duration = max(1, int(state.get("total_duration_secs") or 1))
     future_reserved = remaining_future_budget_secs(state)
     protected_deadline = (
-        total_duration - future_reserved
+        total_duration - future_reserved + grace
         if future_reserved > 0
         else total_duration + grace
     )
@@ -71,6 +80,15 @@ def section_transition_deadline_elapsed(
 
 
 def _timing(state: InterviewState) -> dict[str, int]:
+    """
+    Calculate all derived timing properties for the current interview state.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A dictionary of various calculated timing values in seconds.
+    """
     elapsed = _elapsed_from_event(state)
     total = max(1, int(state.get("total_duration_secs") or 1))
     section_budget = max(
@@ -110,6 +128,15 @@ def _timing(state: InterviewState) -> dict[str, int]:
 
 
 def _timing_updates(timing: dict[str, int]) -> dict[str, int]:
+    """
+    Map calculated timing values to the formal keys expected in InterviewState.
+
+    Args:
+        timing: The dictionary returned by `_timing`.
+
+    Returns:
+        A dictionary of state updates.
+    """
     return {
         "elapsed_secs": timing["elapsed_secs"],
         "remaining_secs": timing["remaining_secs"],
@@ -126,6 +153,15 @@ def _timing_updates(timing: dict[str, int]) -> dict[str, int]:
 def _next_section(
     state: InterviewState,
 ) -> tuple[int, dict[str, Any]] | None:
+    """
+    Find the next valid section (technical or behavioural) in the runtime plan.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A tuple of (section_index, section_dict), or None if no sections remain.
+    """
     sections = list(state.get("runtime_sections") or [])
     current = int(state.get("current_section_index") or 0)
     for index in range(current + 1, len(sections)):
@@ -139,6 +175,16 @@ def _next_section(
 
 
 def _section_label(section: dict[str, Any] | None, fallback: str) -> str:
+    """
+    Generate a human-readable label for a section, preferring the skill name.
+
+    Args:
+        section: The section dictionary, or None.
+        fallback: The fallback string if the section has no explicit label.
+
+    Returns:
+        A clean, space-separated label string.
+    """
     if not section:
         return fallback.replace("_", " ")
     return str(section.get("skill") or section.get("section_name") or fallback).replace(
@@ -151,6 +197,16 @@ def _closing(
     *,
     reason: str,
 ) -> dict[str, Any]:
+    """
+    Construct the state updates required to route the graph into the closing node.
+
+    Args:
+        timing: The computed timing dictionary.
+        reason: The reason code for closing.
+
+    Returns:
+        A dictionary of state updates.
+    """
     return {
         **_timing_updates(timing),
         "next_action": "generate_closing",
@@ -171,6 +227,21 @@ def _transition(
     template_name: str,
     barge_in: bool,
 ) -> dict[str, Any]:
+    """
+    Construct the state updates required to transition to the next interview section.
+
+    Args:
+        state: The current interview state.
+        timing: The computed timing dictionary.
+        next_index: The index of the next section.
+        next_section: The next section dictionary.
+        reason: The reason for the transition.
+        template_name: The name of the preface template to use.
+        barge_in: Whether this was a forced transition due to timeout.
+
+    Returns:
+        A dictionary of state updates.
+    """
     current_label = _section_label(
         None,
         str(state.get("current_section") or "this section"),
@@ -197,7 +268,18 @@ def _transition(
 async def check_time_after_substantial_answer(
     state: InterviewState,
 ) -> dict[str, Any]:
-    """Check timing on the event loop after a substantial candidate answer."""
+    """
+    Check timing on the event loop after a substantial candidate answer.
+
+    This node determines if the interview should continue with another question
+    in the current section, transition to the next section, or close out entirely.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the routing logic and timing values.
+    """
 
     timing = _timing(state)
     schedule_elapsed_persistence(
@@ -258,7 +340,18 @@ async def check_time_after_substantial_answer(
 async def force_section_time_barge_in(
     state: InterviewState,
 ) -> dict[str, Any]:
-    """Force movement on the event loop after the section grace period."""
+    """
+    Force movement on the event loop after the section grace period expires.
+
+    This node is triggered when the candidate has been talking too long and
+    the section has run out of time. It immediately forces a transition or closure.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        State updates containing the barge-in routing logic and timing values.
+    """
 
     timing = _timing(state)
     schedule_elapsed_persistence(
