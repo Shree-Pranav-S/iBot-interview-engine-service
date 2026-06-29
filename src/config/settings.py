@@ -1,6 +1,7 @@
 """Application settings for interview-engine-service."""
 
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import quote_plus
 
 from pydantic import Field
@@ -24,25 +25,38 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = Field(default="")
     DEEPGRAM_STT_MODEL: str = Field(default="nova-3")
     DEEPGRAM_TTS_MODEL: str = Field(default="aura-2-andromeda-en")
+    DEEPGRAM_ENDPOINTING_MS: int = Field(default=300)
+    VAD_MIN_SPEECH_DURATION_SECS: float = Field(default=0.2)
+    VAD_MIN_SILENCE_DURATION_SECS: float = Field(default=0.5)
+    VAD_PREFIX_PADDING_DURATION_SECS: float = Field(default=0.15)
+    TURN_ENDPOINTING_MIN_DELAY_SECS: float = Field(default=1.2)
+    TURN_ENDPOINTING_MAX_DELAY_SECS: float = Field(default=3.0)
+    FALSE_INTERRUPTION_TIMEOUT_SECS: float = Field(default=1.2)
 
     # Groq models used by latency-sensitive graph nodes.
-    GROQ_API_KEY: str = Field(default="")
-    FALLBACK_GROQ_API_KEY: str = Field(default="")
-    GROQ_EVALUATION_API_KEY: str = Field(default="")
-    GROQ_QUESTION_API_KEY: str = Field(default="")
-    GROQ_QUESTION_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    GROQ_QUESTION_GENERATION_KEY: str = Field(default="")
+    FALLBACK_GROQ_QUESTION_GENERATION_KEY: str = Field(default="")
+    GROQ_CLASSIFICATION_KEY: str = Field(default="")
+    FALLBACK_GROQ_CLASSIFICATION_KEY: str = Field(default="")
+    GROQ_EVALUATION_KEY: str = Field(default="")
+    FALLBACK_GROQ_EVALUATION_KEY: str = Field(default="")
+    GROQ_QUESTION_MODEL: str = Field(default="openai/gpt-oss-120b")
     GROQ_QUESTION_MAX_TOKENS: int = Field(default=256)
     GROQ_QUESTION_TEMPERATURE: float = Field(default=0.15)
-    GROQ_QUESTION_TIMEOUT_SECS: float = Field(default=15.0)
-    GROQ_LIVE_EVAL_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=256)
+    GROQ_QUESTION_TIMEOUT_SECS: float = Field(default=10.0)
+    GROQ_LIVE_EVAL_MODEL: str = Field(default="openai/gpt-oss-20b")
+    GROQ_LIVE_EVAL_MAX_TOKENS: int = Field(default=128)
     GROQ_LIVE_EVAL_TEMPERATURE: float = Field(default=0.0)
-    GROQ_CLASSIFY_MODEL: str = Field(default="llama-3.1-8b-instant")
-    GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=256)
+    GROQ_LIVE_EVAL_TIMEOUT_SECS: float = Field(default=6.0)
+    GROQ_CLASSIFY_MODEL: str = Field(default="openai/gpt-oss-20b")
+    GROQ_CLASSIFY_MAX_TOKENS: int = Field(default=128)
     GROQ_CLASSIFY_TEMPERATURE: float = Field(default=0.0)
+    GROQ_CLASSIFY_TIMEOUT_SECS: float = Field(default=5.0)
+    GROQ_REASONING_EFFORT: Literal["low", "medium", "high"] = Field(default="low")
 
     # NVIDIA NIM one-shot holistic evaluation.
     NVIDIA_NIM_API_KEY: str = Field(default="")
+    FALLBACK_NVIDIA_NIM_API_KEY: str = Field(default="")
     NVIDIA_NIM_BASE_URL: str = Field(
         default="https://integrate.api.nvidia.com/v1",
     )
@@ -61,6 +75,7 @@ class Settings(BaseSettings):
     LIVEKIT_API_KEY: str = Field(default="")
     LIVEKIT_API_SECRET: str = Field(default="")
     LIVEKIT_AGENT_NAME: str = Field(default="interview-agent")
+    LIVEKIT_FORCE_RELAY: bool = Field(default=False)
 
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432

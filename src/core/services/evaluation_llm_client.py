@@ -37,6 +37,7 @@ from src.schemas.evaluation_llm import HolisticEvaluationLLMOutput
 
 logger = logging.getLogger(__name__)
 _client: AsyncOpenAI | None = None
+_fallback_client: AsyncOpenAI | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class NvidiaEvaluationResult:
     raw_output: dict[str, Any]
 
 
-def _get_client() -> AsyncOpenAI:
+def _get_client(use_fallback: bool = False) -> AsyncOpenAI:
     """
     Initialize and return a singleton AsyncOpenAI client configured for NVIDIA NIM.
 
@@ -55,7 +56,24 @@ def _get_client() -> AsyncOpenAI:
     Raises:
         PermanentEvaluationError: If the NVIDIA NIM API key is missing.
     """
-    global _client
+    global _client, _fallback_client
+    if use_fallback:
+        api_key = settings.FALLBACK_NVIDIA_NIM_API_KEY.strip()
+        if not api_key:
+            raise PermanentEvaluationError(
+                "FALLBACK_NVIDIA_NIM_API_KEY is required for fallback holistic evaluation"
+            )
+        if _fallback_client is None:
+            _fallback_client = AsyncOpenAI(
+                base_url=settings.NVIDIA_NIM_BASE_URL,
+                api_key=api_key,
+                timeout=settings.NVIDIA_NIM_TIMEOUT_SECS,
+                # Provider failures are retried by Celery with a meaningful delay.
+                # An immediate SDK retry after a five-minute 504 only causes a 429.
+                max_retries=0,
+            )
+        return _fallback_client
+
     api_key = settings.NVIDIA_NIM_API_KEY.strip()
     if not api_key:
         raise PermanentEvaluationError(
@@ -386,6 +404,7 @@ async def _complete(
     messages: list[ChatCompletionMessageParam],
     *,
     enable_reasoning: bool = True,
+    use_fallback: bool = False,
 ) -> str:
     """
     Execute a chat completion call to the NVIDIA NIM LLM.
@@ -423,7 +442,7 @@ async def _complete(
         if enable_reasoning:
             extra_body["reasoning_budget"] = settings.NVIDIA_NIM_REASONING_BUDGET
         if settings.NVIDIA_NIM_STREAM:
-            stream_response = await _get_client().chat.completions.create(
+            stream_response = await _get_client(use_fallback).chat.completions.create(
                 model=settings.NVIDIA_NIM_MODEL,
                 messages=messages,
                 temperature=settings.NVIDIA_NIM_TEMPERATURE,
@@ -471,7 +490,9 @@ async def _complete(
                 },
             )
         else:
-            completion_response = await _get_client().chat.completions.create(
+            completion_response = await _get_client(
+                use_fallback
+            ).chat.completions.create(
                 model=settings.NVIDIA_NIM_MODEL,
                 messages=messages,
                 temperature=settings.NVIDIA_NIM_TEMPERATURE,
@@ -514,6 +535,15 @@ async def _complete(
             elapsed,
             exc,
         )
+        if not use_fallback and settings.FALLBACK_NVIDIA_NIM_API_KEY.strip():
+            logger.info(
+                "Retrying with fallback NVIDIA NIM API key due to RateLimitError..."
+            )
+            return await _complete(
+                messages,
+                enable_reasoning=enable_reasoning,
+                use_fallback=True,
+            )
         raise TransientEvaluationError(
             f"NVIDIA NIM rate limited: {exc}",
             retry_after_seconds=retry_after or 60,
@@ -526,6 +556,17 @@ async def _complete(
             elapsed,
             exc,
         )
+        if (
+            exc.status_code == 429
+            and not use_fallback
+            and settings.FALLBACK_NVIDIA_NIM_API_KEY.strip()
+        ):
+            logger.info("Retrying with fallback NVIDIA NIM API key due to HTTP 429...")
+            return await _complete(
+                messages,
+                enable_reasoning=enable_reasoning,
+                use_fallback=True,
+            )
         if exc.status_code in {408, 409, 425, 429} or exc.status_code >= 500:
             raise TransientEvaluationError(
                 f"Temporary NVIDIA NIM HTTP {exc.status_code}",

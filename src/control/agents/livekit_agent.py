@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterable
 from typing import Any
 
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -36,7 +36,8 @@ from src.utils.livekit import chunk_for_tts
 logger = logging.getLogger("interview-livekit-agent")
 USER_AWAY_TIMEOUT_SECS = 5.0
 THINK_EXTENSION_TIMEOUT_SECS = 15.0
-POST_TURN_SILENCE_GUARD_SECS = 1.25
+POST_TURN_SILENCE_GUARD_SECS = 0.5
+POST_BARGE_RESUMED_SPEECH_GUARD_SECS = 0.75
 DEMO_GREETING = (
     "Welcome to this demo interview. This is a short practice space to help "
     "you become comfortable with the interview environment. Please make "
@@ -66,9 +67,9 @@ def prewarm(proc: agents.JobProcess) -> None:
     """
     proc.userdata["vad"] = inference.VAD(
         model="silero",
-        min_speech_duration=0.3,
-        min_silence_duration=0.5,
-        prefix_padding_duration=0.2,
+        min_speech_duration=settings.VAD_MIN_SPEECH_DURATION_SECS,
+        min_silence_duration=settings.VAD_MIN_SILENCE_DURATION_SECS,
+        prefix_padding_duration=settings.VAD_PREFIX_PADDING_DURATION_SECS,
     )
 
 
@@ -249,6 +250,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._pending_section_barge_task: asyncio.Task[None] | None = None
         self._barge_in_active = False
         self._discard_inflight_user_turn = False
+        self._post_barge_guard_deadline: float | None = None
         self._live_user_transcript = ""
         self._committed_user_transcript = ""
         self._current_user_interim = ""
@@ -465,7 +467,28 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if new_state == "speaking":
             self._cancel_pending_silence()
-            if self._discard_inflight_user_turn and not self._barge_in_active:
+            now = time.monotonic()
+            if (
+                self._post_barge_guard_deadline is not None
+                and now <= self._post_barge_guard_deadline
+            ):
+                # Disabling audio during a timed section transition forces
+                # LiveKit into "listening". If the interrupted candidate is
+                # still talking when audio resumes, LiveKit reports it as a
+                # fresh turn. Discard that resumed fragment instead of
+                # classifying it against the next section's question.
+                self._discard_inflight_user_turn = True
+                self._post_barge_guard_deadline = None
+                logger.info(
+                    "Discarding speech resumed across section transition",
+                    extra={
+                        "candidate_assessment_id": (self.bridge.candidate_assessment_id)
+                    },
+                )
+            elif self._post_barge_guard_deadline is not None:
+                self._post_barge_guard_deadline = None
+                self._discard_inflight_user_turn = False
+            elif self._discard_inflight_user_turn and not self._barge_in_active:
                 # A new post-transition turn is valid; only the interrupted turn
                 # should be discarded.
                 self._discard_inflight_user_turn = False
@@ -548,6 +571,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if self._barge_in_active or self._discard_inflight_user_turn:
             self._discard_inflight_user_turn = False
+            self._user_turn_started_at = None
+            self._last_user_turn_duration_ms = None
+            self._last_user_turn_finished_at = time.monotonic()
+            self._clear_live_user_transcript()
             raise StopResponse()
 
         candidate_text = " ".join((new_message.text_content or "").split())
@@ -702,6 +729,9 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if self._interview_closed or self._barge_in_active:
             return
 
+        had_inflight_user_turn = bool(
+            self._user_turn_started_at is not None or self._live_user_transcript
+        )
         remaining = self.bridge.seconds_until_section_barge_in()
         if remaining is None:
             return
@@ -710,7 +740,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             return
 
         self._barge_in_active = True
-        self._discard_inflight_user_turn = self._user_turn_started_at is not None
+        self._discard_inflight_user_turn = had_inflight_user_turn
         self._cancel_pending_silence()
         try:
             try:
@@ -748,6 +778,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             self._barge_in_active = False
             if not self._interview_closed:
                 self.session.input.set_audio_enabled(True)
+                if had_inflight_user_turn:
+                    self._post_barge_guard_deadline = (
+                        time.monotonic() + POST_BARGE_RESUMED_SPEECH_GUARD_SECS
+                    )
                 self._schedule_section_barge_watchdog()
 
     async def llm_node(
@@ -865,6 +899,7 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             punctuate=True,
             smart_format=True,
             no_delay=True,
+            endpointing_ms=settings.DEEPGRAM_ENDPOINTING_MS,
             filler_words=True,
             vad_events=True,
             api_key=settings.DEEPGRAM_API_KEY or agents.NOT_GIVEN,
@@ -881,15 +916,17 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             ),
             endpointing={
                 "mode": "dynamic",
-                "min_delay": 0.8,
-                "max_delay": 2.5,
+                "min_delay": settings.TURN_ENDPOINTING_MIN_DELAY_SECS,
+                "max_delay": settings.TURN_ENDPOINTING_MAX_DELAY_SECS,
             },
             interruption={
                 "enabled": True,
                 "mode": "adaptive",
                 "min_duration": 0.5,
                 "min_words": 1,
-                "false_interruption_timeout": 2.0,
+                "false_interruption_timeout": (
+                    settings.FALSE_INTERRUPTION_TIMEOUT_SECS
+                ),
                 "resume_false_interruption": True,
                 "discard_audio_if_uninterruptible": True,
             },
@@ -978,14 +1015,27 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         if isinstance(agent, InterviewLiveKitAgent):
             asyncio.create_task(agent.handle_session_close(reason))
 
+    rtc_config = (
+        rtc.RtcConfiguration(
+            ice_transport_type=rtc.IceTransportType.TRANSPORT_RELAY,
+        )
+        if settings.LIVEKIT_FORCE_RELAY
+        else None
+    )
     logger.info(
-        "Connecting LiveKit job with automatic ICE transport selection",
+        "Connecting LiveKit job",
         extra={
             "candidate_assessment_id": candidate_assessment_id,
             "session_mode": session_mode,
+            "transport_mode": (
+                "relay" if settings.LIVEKIT_FORCE_RELAY else "automatic"
+            ),
         },
     )
-    await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
+    await ctx.connect(
+        auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY,
+        rtc_config=rtc_config,
+    )
     await ctx.wait_for_participant()
 
     await session.start(agent=agent, room=ctx.room)

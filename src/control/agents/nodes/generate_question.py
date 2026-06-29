@@ -212,7 +212,6 @@ def _technical_messages(
             )
         ),
         "resume_context": state.get("resume_context") or {},
-        "schema": TechnicalQuestionGenerationResponse.model_json_schema(),
     }
     return [
         {
@@ -258,7 +257,6 @@ def _behavioural_messages(
         "signals_already_used": [
             item.get("topic") for item in asked if item.get("topic")
         ],
-        "schema": BehaviouralQuestionGenerationResponse.model_json_schema(),
     }
     return [
         {
@@ -336,34 +334,21 @@ async def _generate_technical(
     )
     asked = _questions_for_skill(state, skill)
     recent_acknowledgements = _recent_acknowledgements(state)
-    for attempt in range(2):
-        try:
-            result = await generate_with_schema(
-                messages,
-                TechnicalQuestionGenerationResponse,
-            )
-            if result.difficulty != target_difficulty:
-                raise ValueError("question generator changed deterministic difficulty")
-            if result.probe_deeper is not probe_deeper:
-                raise ValueError("question generator changed deterministic probe flag")
-            return result
-        except Exception as exc:
-            logger.warning(
-                "Technical question generation attempt %s failed: %s",
-                attempt + 1,
-                exc,
-            )
-            messages = [
-                *messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "The previous output violated the schema or changed "
-                        "deterministic controls. Return a valid JSON object with "
-                        "the exact target difficulty and probe_deeper value."
-                    ),
-                },
-            ]
+    try:
+        result = await generate_with_schema(
+            messages,
+            TechnicalQuestionGenerationResponse,
+        )
+        if result.difficulty != target_difficulty:
+            raise ValueError("question generator changed deterministic difficulty")
+        if result.probe_deeper is not probe_deeper:
+            raise ValueError("question generator changed deterministic probe flag")
+        return result
+    except Exception as exc:
+        logger.warning(
+            "Technical question generation failed; using local fallback: %s",
+            exc,
+        )
 
     fallback_topic = f"{skill} fundamentals"
     candidates = template_variants(
@@ -395,8 +380,8 @@ async def _generate_behavioural(
     expected_signals: list[str],
 ) -> BehaviouralQuestionGenerationResponse:
     """
-    Generate and strictly validate a behavioural/cultural question.
-    Retries once on failure, then falls back to pre-written templates.
+    Generate and validate a behavioural/cultural question.
+    Falls back locally if the model output is invalid.
 
     Args:
         state: The interview state.
@@ -411,30 +396,18 @@ async def _generate_behavioural(
     )
     asked = _behavioural_questions(state)
     recent_acknowledgements = _recent_acknowledgements(state)
-    for attempt in range(2):
-        try:
-            result = await generate_with_schema(
-                messages,
-                BehaviouralQuestionGenerationResponse,
-            )
-            _validate_unique_question(result.question_text, asked)
-            return result
-        except Exception as exc:
-            logger.warning(
-                "Behavioural question generation attempt %s failed: %s",
-                attempt + 1,
-                exc,
-            )
-            messages = [
-                *messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "The previous output was invalid or repeated an earlier "
-                        "question. Return a different valid JSON object."
-                    ),
-                },
-            ]
+    try:
+        result = await generate_with_schema(
+            messages,
+            BehaviouralQuestionGenerationResponse,
+        )
+        _validate_unique_question(result.question_text, asked)
+        return result
+    except Exception as exc:
+        logger.warning(
+            "Behavioural question generation failed; using local fallback: %s",
+            exc,
+        )
 
     signal = (
         expected_signals[len(asked) % len(expected_signals)]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from src.control.agents.nodes.llm_helpers import classify_with_schema
@@ -73,12 +74,101 @@ SELF_INTRO_PROFESSIONAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SELF_INTRO_ELABORATION_WORD_THRESHOLD = 15
+QUESTION_LIKE_ANSWER_PATTERN = re.compile(
+    r"^\s*(?:when you say|what do you mean|do you mean|did you mean|"
+    r"are you asking|should i|would you like|does that include|"
+    r"is the question|can you clarify|could you clarify)\b",
+    re.IGNORECASE,
+)
+CONTENT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:[+#.-][a-z0-9]+)*")
+CLASSIFICATION_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "also",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "can",
+        "could",
+        "describe",
+        "did",
+        "do",
+        "does",
+        "explain",
+        "for",
+        "from",
+        "give",
+        "how",
+        "i",
+        "in",
+        "into",
+        "is",
+        "it",
+        "me",
+        "of",
+        "on",
+        "or",
+        "please",
+        "tell",
+        "that",
+        "the",
+        "their",
+        "this",
+        "to",
+        "use",
+        "using",
+        "was",
+        "what",
+        "when",
+        "which",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
 
 
 def _spoken_word_count(text: str) -> int:
     """Count spoken words using the same technical-token rules as classification."""
 
     return len(re.findall(r"\b[\w+#.-]+\b", text))
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Return meaningful lowercase tokens for conservative relevance matching."""
+
+    return {
+        token
+        for token in CONTENT_TOKEN_PATTERN.findall(text.casefold())
+        if len(token) > 1 and token not in CLASSIFICATION_STOP_WORDS
+    }
+
+
+def _is_clear_relevant_answer(state: InterviewState, text: str) -> bool:
+    """
+    Recognize only high-confidence answer attempts without an LLM round trip.
+
+    Two meaningful terms shared with the active question are enough to establish
+    relevance for a developed spoken response. Question-like utterances remain
+    model-classified so genuine scope doubts are not mistaken for answers.
+    """
+
+    if _spoken_word_count(text) < 10:
+        return False
+    if text.rstrip().endswith("?") or QUESTION_LIKE_ANSWER_PATTERN.search(text):
+        return False
+
+    question_tokens = _content_tokens(str(state.get("current_question_text") or ""))
+    response_tokens = _content_tokens(text)
+    return len(question_tokens & response_tokens) >= 2
 
 
 def _result(
@@ -179,6 +269,12 @@ def _deterministic_classification(
                 clarification_type=None,
                 is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
             )
+    if _is_clear_relevant_answer(state, text):
+        return _result(
+            response_type="answer",
+            clarification_type=None,
+            is_substantial=True,
+        )
     return None
 
 
@@ -192,20 +288,10 @@ def _classification_messages(state: InterviewState) -> list[dict[str, str]]:
     Returns:
         A list of chat messages for the LLM.
     """
-    duration_ms = state.get("previous_response_duration_ms")
     context = {
         "previous_candidate_response": state.get("previous_candidate_response") or "",
         "previous_question": state.get("current_question_text") or "",
         "is_self_introduction": bool(state.get("is_self_introduction")),
-        "resume_context": state.get("resume_context")
-        or {
-            "skills": [],
-            "experience_years": 0,
-        },
-        "response_duration_seconds": (
-            round(int(duration_ms) / 1000, 2) if duration_ms is not None else None
-        ),
-        "schema": CandidateResponseClassification.model_json_schema(),
     }
     return [
         {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
@@ -385,6 +471,7 @@ async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
         and the `next_action` routing key.
     """
 
+    started_at = time.perf_counter()
     text = str(state.get("previous_candidate_response") or "")
     classification = _deterministic_classification(state, text)
     source = "deterministic"
@@ -457,6 +544,18 @@ async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
         "decline_think_time",
     }:
         silence_stage = "none"
+
+    logger.info(
+        "Candidate response classified",
+        extra={
+            "candidate_assessment_id": state.get("candidate_assessment_id"),
+            "question_id": state.get("current_question_id"),
+            "response_type": response_type,
+            "is_substantial": is_substantial,
+            "classification_source": source,
+            "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        },
+    )
 
     return {
         "last_classification": classification,

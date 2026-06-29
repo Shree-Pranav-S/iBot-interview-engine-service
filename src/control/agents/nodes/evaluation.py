@@ -28,15 +28,6 @@ def _evaluation_messages(state: InterviewState) -> list[dict[str, str]]:
     context = {
         "previous_candidate_response": state.get("previous_candidate_response") or "",
         "previous_question": state.get("current_question_text") or "",
-        "current_technical_skill": state.get("current_technical_skill"),
-        "expected_signals": list(state.get("current_expected_signals") or []),
-        "question_difficulty": state.get("current_question_difficulty"),
-        "resume_context": state.get("resume_context")
-        or {
-            "skills": [],
-            "experience_years": 0,
-        },
-        "schema": AnswerEvaluationResponse.model_json_schema(),
     }
     return [
         {"role": "system", "content": LIVE_EVALUATION_SYSTEM_PROMPT},

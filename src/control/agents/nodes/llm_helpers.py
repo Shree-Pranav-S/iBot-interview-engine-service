@@ -1,4 +1,4 @@
-"""Strict JSON helpers for classification, evaluation, and generation."""
+"""Typed Structured Outputs helpers for interview workflow LLM calls."""
 
 from __future__ import annotations
 
@@ -16,21 +16,20 @@ async def classify_with_schema(
     response_model: type[ResponseModelT],
 ) -> ResponseModelT:
     """
-    Call the classifier LLM and reject anything outside the Pydantic contract.
+    Call the classifier with its API-enforced Pydantic contract.
 
     Args:
         messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the expected JSON structure.
+        response_model: The Pydantic model defining the response structure.
 
     Returns:
         A validated instance of the response model.
 
     Raises:
-        ValidationError: If the LLM output does not match the schema.
+        ValidationError: If semantic Pydantic validators reject the response.
     """
 
-    raw = await llm_service.classify(messages)
-    return response_model.model_validate_json(raw)
+    return await llm_service.classify(messages, response_model)
 
 
 async def evaluate_with_schema(
@@ -42,14 +41,13 @@ async def evaluate_with_schema(
 
     Args:
         messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the expected JSON structure.
+        response_model: The Pydantic model defining the response structure.
 
     Returns:
         A validated instance of the response model.
     """
 
-    raw = await llm_service.live_evaluate(messages)
-    return response_model.model_validate_json(raw)
+    return await llm_service.live_evaluate(messages, response_model)
 
 
 async def generate_with_schema(
@@ -57,18 +55,17 @@ async def generate_with_schema(
     response_model: type[ResponseModelT],
 ) -> ResponseModelT:
     """
-    Call the question generator LLM and reject non-schema JSON.
+    Call the question generator with its API-enforced Pydantic contract.
 
     Args:
         messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the expected JSON structure.
+        response_model: The Pydantic model defining the response structure.
 
     Returns:
         A validated instance of the response model.
     """
 
-    raw = await llm_service.generate(messages)
-    return response_model.model_validate_json(raw)
+    return await llm_service.generate(messages, response_model)
 
 
 async def rephrase_with_schema(
@@ -80,16 +77,15 @@ async def rephrase_with_schema(
 
     Args:
         messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the expected JSON structure.
+        response_model: The Pydantic model defining the response structure.
 
     Returns:
         A validated instance of the response model.
     """
 
-    raw = await llm_service.lightweight(
+    return await llm_service.lightweight(
         messages,
+        response_model,
         max_tokens=128,
         temperature=0.1,
-        json_mode=True,
     )
-    return response_model.model_validate_json(raw)

@@ -175,7 +175,6 @@ async def _rephrase_question(
         "current_section": state.get("current_section"),
         "current_skill": state.get("current_technical_skill"),
         "question_difficulty": state.get("current_question_difficulty"),
-        "schema": QuestionRephraseResponse.model_json_schema(),
     }
     messages = [
         {"role": "system", "content": QUESTION_REPHRASE_SYSTEM_PROMPT},
@@ -184,50 +183,38 @@ async def _rephrase_question(
             "content": json.dumps(context, ensure_ascii=False, default=str),
         },
     ]
-    for attempt in range(2):
-        try:
-            result = await rephrase_with_schema(
-                messages,
-                QuestionRephraseResponse,
-            )
-            rewritten = " ".join(result.question_text.split())
-            similarity = SequenceMatcher(
+    try:
+        result = await rephrase_with_schema(
+            messages,
+            QuestionRephraseResponse,
+        )
+        rewritten = " ".join(result.question_text.split())
+        similarity = SequenceMatcher(
+            None,
+            _normalized_question(question),
+            _normalized_question(rewritten),
+        ).ratio()
+        if similarity >= 0.9:
+            raise ValueError("rephrased question is too close to original")
+        previous_rephrase = str(state.get("last_rephrased_question") or "").strip()
+        if previous_rephrase:
+            previous_similarity = SequenceMatcher(
                 None,
-                _normalized_question(question),
+                _normalized_question(previous_rephrase),
                 _normalized_question(rewritten),
             ).ratio()
-            if similarity >= 0.9:
-                raise ValueError("rephrased question is too close to original")
-            previous_rephrase = str(state.get("last_rephrased_question") or "").strip()
-            if previous_rephrase:
-                previous_similarity = SequenceMatcher(
-                    None,
-                    _normalized_question(previous_rephrase),
-                    _normalized_question(rewritten),
-                ).ratio()
-                if previous_similarity >= 0.88:
-                    raise ValueError("rephrased question repeats the previous rewrite")
-            return rewritten
-        except Exception as exc:
-            logger.warning(
-                "Question rephrase attempt %s failed: %s",
-                attempt + 1,
-                exc,
-                extra={
-                    "candidate_assessment_id": state.get("candidate_assessment_id"),
-                    "question_id": state.get("current_question_id"),
-                },
-            )
-            messages = [
-                *messages,
-                {
-                    "role": "user",
-                    "content": (
-                        "Rewrite it with a clearly different sentence structure "
-                        "while preserving its exact intent. Return only schema JSON."
-                    ),
-                },
-            ]
+            if previous_similarity >= 0.88:
+                raise ValueError("rephrased question repeats the previous rewrite")
+        return rewritten
+    except Exception as exc:
+        logger.warning(
+            "Question rephrase failed; using local fallback: %s",
+            exc,
+            extra={
+                "candidate_assessment_id": state.get("candidate_assessment_id"),
+                "question_id": state.get("current_question_id"),
+            },
+        )
     return _fallback_rephrase(
         question,
         use_alternate=bool(state.get("last_rephrased_question")),
