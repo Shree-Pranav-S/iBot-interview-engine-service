@@ -78,6 +78,78 @@ class AnswerEvaluationResponse(StrictPromptModel):
     strength: Literal["weak", "adequate", "strong"]
 
 
+class InterviewerTurnResponse(StrictPromptModel):
+    """Single merged contract: classify, evaluate, and respond in one call.
+
+    The model first decides ``response_type``. When the candidate gave a genuine
+    answer it judges substantiality (and, for technical sections, strength) and
+    produces the next acknowledgement and question. For clarifications it returns
+    the precise ``clarification_type`` and, when relevant, a spoken
+    ``clarification_response``. Difficulty and probe depth are decided
+    deterministically by the server, never by the model.
+    """
+
+    response_type: Literal["answer", "clarification", "irrelevant"]
+    clarification_type: (
+        Literal[
+            "repeat_question",
+            "rephrase_question",
+            "skip_question",
+            "question_doubt",
+            "time_to_think",
+        ]
+        | None
+    )
+    is_substantial: bool | None
+    answer_strength: Literal["weak", "adequate", "strong"] | None
+    acknowledgement: str | None = Field(max_length=200)
+    question_text: str | None = Field(max_length=260)
+    topic: str | None = Field(max_length=100)
+    clarification_response: str | None = Field(max_length=440)
+
+    @model_validator(mode="after")
+    def validate_interviewer_turn(self) -> InterviewerTurnResponse:
+        if self.acknowledgement:
+            lowered = self.acknowledgement.casefold()
+            if any(phrase in lowered for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
+                raise ValueError("acknowledgement contains evaluative feedback")
+            if "?" in self.acknowledgement:
+                raise ValueError("acknowledgement must not contain a question")
+        if self.question_text and _spoken_word_count(self.question_text) > 60:
+            raise ValueError("question_text must be at most 60 words")
+
+        if self.response_type == "answer":
+            if self.clarification_type is not None:
+                raise ValueError("answer requires clarification_type=null")
+            if self.is_substantial is None:
+                raise ValueError("answer requires is_substantial")
+            if self.question_text and "?" not in self.question_text:
+                raise ValueError("question_text must contain a question")
+            return self
+
+        if self.response_type == "clarification":
+            if self.clarification_type is None:
+                raise ValueError("clarification requires clarification_type")
+            if self.clarification_type in {"question_doubt", "rephrase_question"} and (
+                not self.clarification_response
+            ):
+                raise ValueError(
+                    "doubt/rephrase clarifications require a clarification_response"
+                )
+            if (
+                self.clarification_type == "rephrase_question"
+                and self.clarification_response
+                and "?" not in self.clarification_response
+            ):
+                raise ValueError("a rephrased question must contain a question mark")
+            return self
+
+        # irrelevant
+        if self.clarification_type is not None:
+            raise ValueError("irrelevant requires clarification_type=null")
+        return self
+
+
 FORBIDDEN_INTERVIEWER_FEEDBACK = (
     "good answer",
     "correct",

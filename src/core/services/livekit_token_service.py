@@ -69,6 +69,21 @@ class LiveKitTokenService:
         return max(timedelta(minutes=1), remaining)
 
     @staticmethod
+    def _datetime_value(value: object) -> datetime:
+        """Normalize a datetime returned by the internal JSON API."""
+
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise InternalServerException(
+                    "Candidate session expiry is invalid."
+                ) from exc
+        raise InternalServerException("Candidate session expiry is missing.")
+
+    @staticmethod
     async def _ensure_agent_dispatch(
         room_name: str,
         agent_metadata: dict[str, str],
@@ -225,7 +240,9 @@ class LiveKitTokenService:
             .with_ttl(
                 min(
                     timedelta(minutes=30),
-                    self._livekit_ttl(context["session_token_expires_at"]),
+                    self._livekit_ttl(
+                        self._datetime_value(context["session_token_expires_at"])
+                    ),
                 )
             )
             .with_grants(

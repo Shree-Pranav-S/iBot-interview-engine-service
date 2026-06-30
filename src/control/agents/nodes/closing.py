@@ -23,10 +23,14 @@ def generate_closing_message(state: InterviewState) -> dict[str, Any]:
         State updates containing the closing bot turn and terminal routing keys.
     """
 
-    text = choose_template(
+    closing_body = choose_template(
         "closing",
         company_name=state.get("company_name") or "the company",
     )
+    # The merged interviewer turn may have spoken a brief acknowledgement of the
+    # final answer; prepend it so the closing flows naturally from it.
+    lead = " ".join(str(state.get("pregenerated_closing_lead") or "").split())
+    text = f"{lead} {closing_body}".strip() if lead else closing_body
     closing_state: InterviewState = {
         **state,
         "bot_reply_text": text,
@@ -49,6 +53,7 @@ def generate_closing_message(state: InterviewState) -> dict[str, Any]:
         "closing_done": True,
         "session_status": "CLOSING",
         "holistic_evaluation_status": "PENDING",
+        "pregenerated_closing_lead": None,
         "next_action": "end",
         "phase_complete": True,
     }

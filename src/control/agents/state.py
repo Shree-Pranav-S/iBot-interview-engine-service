@@ -54,6 +54,11 @@ class InterviewState(TypedDict, total=False):
     candidate_event: dict[str, Any] | str | None
     previous_candidate_response: str
     previous_response_duration_ms: int | None
+    speculative_interviewer_result: dict[str, Any] | None
+    # Stable key-pool affinity captured before this candidate turn is processed.
+    # It survives candidate persistence so regeneration/rephrasing stays on the
+    # same organization even after ``turn_number`` advances.
+    llm_key_slot: int | None
 
     # Strict model outputs, stored as JSON-compatible dictionaries.
     last_classification: dict[str, Any] | None
@@ -69,12 +74,20 @@ class InterviewState(TypedDict, total=False):
     skill_evaluation_streaks: dict[str, dict[str, int]]
     question_variation_seed: str
     probe_deeper: bool
+    thread_follow_up_used: bool
     last_skip_resume_skill_match: bool
 
     # Static/dynamic response control.
     bot_reply_text: str
     bot_reply_type: str
     response_preface_text: str | None
+    # Merged interviewer-turn handoff. When the single classify/evaluate/generate
+    # call produces a next question, it is staged here for generate_next_question to
+    # apply without a second LLM call. Clarification text (doubt/rephrase) produced
+    # by the same call is staged for generate_bot_response.
+    pregenerated_question: dict[str, Any] | None
+    pregenerated_closing_lead: str | None
+    pending_clarification_text: str | None
     silence_stage: SilenceStage
     skip_attempts_for_current_question: int
     self_intro_elaboration_requested: bool
@@ -104,6 +117,7 @@ class InterviewState(TypedDict, total=False):
     suppress_previous_context_for_next_question: bool
     transition_reason: str | None
     barge_in_triggered: bool
+    self_intro_leftover_redistributed: bool
 
     # Timer/lifecycle metadata. Initialization never starts the timer.
     timer_started: bool

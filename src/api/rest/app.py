@@ -9,13 +9,11 @@ from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.livekit import router as livekit_router
 from src.config.settings import settings
 from src.control.agents.graphs import close_graph, init_graph
-from src.data.clients.postgres_client import close_db, init_db
 from src.data.clients.redis_client import close_redis, init_redis
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
     await init_redis()
     await init_graph()
 
@@ -24,7 +22,6 @@ async def lifespan(app: FastAPI):
     finally:
         await close_graph()
         await close_redis()
-        await close_db()
 
 
 def create_app() -> FastAPI:

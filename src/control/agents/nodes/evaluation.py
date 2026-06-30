@@ -6,6 +6,7 @@ import json
 import logging
 from typing import Any
 
+from src.control.agents.key_routing import active_turn_key_slot
 from src.control.agents.nodes.llm_helpers import evaluate_with_schema
 from src.control.agents.prompts import LIVE_EVALUATION_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
@@ -57,6 +58,7 @@ async def evaluate_substantial_answer(state: InterviewState) -> dict[str, Any]:
         result = await evaluate_with_schema(
             _evaluation_messages(state),
             AnswerEvaluationResponse,
+            key_slot=active_turn_key_slot(state),
         )
     except Exception:
         logger.exception(

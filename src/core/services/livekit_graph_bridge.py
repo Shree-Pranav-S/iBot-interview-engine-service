@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -10,11 +11,18 @@ from typing import Any, cast
 
 from langgraph.types import Command
 
+from src.clients.core_api_client import get_core_api_client
 from src.control.agents.graphs import get_graph
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
 )
+from src.control.agents.nodes.speculative_interviewer import (
+    SpeculativeCacheEntry,
+    cache_matches_final,
+    warm_speculative_interviewer_turn,
+)
 from src.control.agents.nodes.time_manager import (
+    FORCE_BEHAVIOURAL_REMAINING_SECS,
     SECTION_BARGE_IN_GRACE_SECS,
     section_transition_deadline_elapsed,
 )
@@ -23,7 +31,6 @@ from src.core.services.candidate_session_service import CandidateSessionService
 from src.core.services.event_log_service import (
     try_record_event_in_background,
 )
-from src.data.repositories.unit_of_work import InterviewUnitOfWork
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.utils.interview_graph import utc_now_iso
 
@@ -49,6 +56,8 @@ class LiveKitInterviewBridge:
         self._timer_started_monotonic: float | None = None
         self._timer_started_at: datetime | None = None
         self._elapsed_before_connection_secs = 0
+        self._speculative_cache: SpeculativeCacheEntry | None = None
+        self._speculative_warm_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _is_terminal(state: dict[str, Any]) -> bool:
@@ -88,13 +97,13 @@ class LiveKitInterviewBridge:
         existing = await self._checkpoint_state()
         if existing:
             self.state = existing
-            async with InterviewUnitOfWork() as unit_of_work:
-                context = await unit_of_work.assessment_context.load_interview_context(
-                    self.candidate_assessment_id,
-                )
-                session = await unit_of_work.interview_sessions.get_session_by_candidate_assessment_id(
-                    self.candidate_assessment_id,
-                )
+            client = get_core_api_client()
+            context = await client.load_interview_context(
+                self.candidate_assessment_id,
+            )
+            session = await client.get_session_by_candidate_assessment_id(
+                self.candidate_assessment_id,
+            )
             self._elapsed_before_connection_secs = max(
                 0,
                 int(session.get("total_elapsed_secs") or 0),
@@ -129,16 +138,12 @@ class LiveKitInterviewBridge:
             return False
 
         session_id = str((self.state or {}).get("interview_session_id") or "")
-        async with InterviewUnitOfWork() as unit_of_work:
-            started_at = (
-                await unit_of_work.assessment_context.mark_candidate_timer_started(
-                    self.candidate_assessment_id,
-                )
-            )
-            if session_id:
-                await unit_of_work.interview_sessions.mark_session_in_progress(
-                    session_id,
-                )
+        client = get_core_api_client()
+        started_at = await client.mark_candidate_timer_started(
+            self.candidate_assessment_id,
+        )
+        if session_id:
+            await client.mark_session_in_progress(session_id)
         self._timer_started_monotonic = time.monotonic()
         self._timer_started_at = started_at
         if session_id:
@@ -205,7 +210,23 @@ class LiveKitInterviewBridge:
             cast(InterviewState, state),
             grace_secs=SECTION_BARGE_IN_GRACE_SECS,
         )
-        return max(0.0, float(deadline_elapsed - self.elapsed_secs()))
+        section_delay = max(0.0, float(deadline_elapsed - self.elapsed_secs()))
+        current_index = int(state.get("current_section_index") or 0)
+        behavioural_pending = any(
+            index > current_index
+            and section.get("section_kind") == "behavioural_cultural"
+            for index, section in enumerate(list(state.get("runtime_sections") or []))
+        )
+        if not behavioural_pending:
+            return section_delay
+        total_duration = max(1, int(state.get("total_duration_secs") or 1))
+        rescue_delay = max(
+            0.0,
+            float(
+                total_duration - self.elapsed_secs() - FORCE_BEHAVIOURAL_REMAINING_SECS
+            ),
+        )
+        return min(section_delay, rescue_delay)
 
     def _merge_result(self, result: Any) -> None:
         """
@@ -220,6 +241,63 @@ class LiveKitInterviewBridge:
             "timer_started_at": previous.get("timer_started_at"),
         }
         self.state = {**dict(result or {}), **timer_state}
+
+    def _cancel_speculative_warm(self) -> None:
+        task = self._speculative_warm_task
+        if task and not task.done():
+            task.cancel()
+        self._speculative_warm_task = None
+
+    async def warm_speculative_turn(self, text: str) -> None:
+        """
+        Pre-compute the merged interviewer call before LiveKit confirms EOT.
+
+        Does not resume LangGraph; results are cached for the final turn submit.
+        """
+
+        if self.state is None:
+            await self.start_or_resume()
+        if not self.state or self._is_terminal(self.state):
+            return
+        if self.state.get("phase_complete"):
+            return
+
+        self._cancel_speculative_warm()
+
+        async def _run() -> None:
+            try:
+                entry = await warm_speculative_interviewer_turn(
+                    self.state or {},
+                    text,
+                )
+                if entry is not None:
+                    self._speculative_cache = entry
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Speculative interviewer warmup failed",
+                    exc_info=True,
+                    extra={
+                        "candidate_assessment_id": self.candidate_assessment_id,
+                    },
+                )
+
+        self._speculative_warm_task = asyncio.create_task(_run())
+
+    def _take_speculative_result(self, final_text: str) -> dict[str, Any] | None:
+        """Return a cached merged result when it matches the final transcript."""
+
+        self._cancel_speculative_warm()
+        entry = self._speculative_cache
+        self._speculative_cache = None
+        if entry is None or not cache_matches_final(
+            entry,
+            final_text,
+            self.state or {},
+        ):
+            return None
+        return dict(entry.result)
 
     async def submit_candidate_turn(
         self,
@@ -250,7 +328,7 @@ class LiveKitInterviewBridge:
             return ""
 
         graph = await get_graph()
-        event = {
+        event: dict[str, Any] = {
             "event_type": "candidate_answer",
             "text": " ".join(text.split()),
             "stt_confidence": stt_confidence,
@@ -258,6 +336,9 @@ class LiveKitInterviewBridge:
             "elapsed_secs": self.elapsed_secs(),
             "received_at": utc_now_iso(),
         }
+        speculative = self._take_speculative_result(text)
+        if speculative is not None:
+            event["speculative_interviewer_result"] = speculative
         result = await graph.ainvoke(
             Command(resume=event),
             config=self._config,
@@ -339,15 +420,13 @@ class LiveKitInterviewBridge:
         session_id = str(state.get("interview_session_id") or "")
         elapsed = self.elapsed_secs()
         await drain_background_persistence(session_id or None)
-        async with InterviewUnitOfWork() as unit_of_work:
-            if session_id:
-                await unit_of_work.interview_sessions.complete_session(
-                    session_id,
-                    total_elapsed_secs=elapsed,
-                )
-            await unit_of_work.assessment_context.mark_candidate_completed(
-                self.candidate_assessment_id,
+        client = get_core_api_client()
+        if session_id:
+            await client.complete_session(
+                session_id,
+                total_elapsed_secs=elapsed,
             )
+        await client.mark_candidate_completed(self.candidate_assessment_id)
         state.update(
             {
                 "session_status": "COMPLETED",

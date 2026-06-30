@@ -7,8 +7,8 @@ import copy
 import logging
 from typing import Any
 
+from src.clients.core_api_client import get_core_api_client
 from src.control.agents.state import InterviewState
-from src.data.repositories.unit_of_work import InterviewUnitOfWork
 
 logger = logging.getLogger(__name__)
 _background_persistence_tasks: set[asyncio.Task[None]] = set()
@@ -33,17 +33,12 @@ async def persist_turn(
     """
 
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
-    async with lock, InterviewUnitOfWork() as unit_of_work:
-        for item in transcript_items:
-            await unit_of_work.interview_sessions.append_transcript_turn(
-                session_id,
-                item,
-            )
-        for violation in violations:
-            await unit_of_work.interview_sessions.append_violation(
-                session_id,
-                violation,
-            )
+    async with lock:
+        await get_core_api_client().persist_turn(
+            session_id=session_id,
+            transcript_items=transcript_items,
+            violations=violations,
+        )
 
 
 async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
@@ -55,11 +50,12 @@ async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
         elapsed_secs: The total elapsed seconds.
     """
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
-    async with lock, InterviewUnitOfWork() as unit_of_work:
-        await unit_of_work.interview_sessions.update_elapsed_time(
-            session_id,
+    async with lock:
+        await get_core_api_client().persist_turn(
+            session_id=session_id,
+            transcript_items=[],
+            violations=[],
             elapsed_secs=elapsed_secs,
-            total_pause_secs=0,
         )
 
 

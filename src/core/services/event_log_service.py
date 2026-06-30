@@ -2,15 +2,14 @@
 
 import logging
 
-from src.data.repositories.unit_of_work import InterviewUnitOfWork
+from src.clients.core_api_client import get_core_api_client
 from src.schemas.event_log import EventLogCreate
 
 logger = logging.getLogger(__name__)
 
 
 async def record_event_in_background(event: EventLogCreate) -> None:
-    async with InterviewUnitOfWork() as unit_of_work:
-        await unit_of_work.event_logs.create(event)
+    await get_core_api_client().create_event_log(event)
 
 
 async def try_record_event_in_background(event: EventLogCreate) -> None:

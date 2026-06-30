@@ -9,11 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from src.config.settings import settings
 from src.control.agents.nodes.await_response import await_candidate_response
-from src.control.agents.nodes.classify_response import (
-    classify_candidate_response,
-)
 from src.control.agents.nodes.closing import generate_closing_message
-from src.control.agents.nodes.evaluation import evaluate_substantial_answer
 from src.control.agents.nodes.final_evaluation import (
     trigger_final_evaluation,
 )
@@ -22,6 +18,7 @@ from src.control.agents.nodes.generate_question import generate_next_question
 from src.control.agents.nodes.initialize_context import (
     initialize_interview_context,
 )
+from src.control.agents.nodes.interviewer_turn import interviewer_turn
 from src.control.agents.nodes.opening import deliver_opening
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
@@ -29,7 +26,6 @@ from src.control.agents.nodes.persist_turn import (
     persist_candidate_output,
 )
 from src.control.agents.nodes.time_manager import (
-    check_time_after_substantial_answer,
     force_section_time_barge_in,
 )
 from src.control.agents.state import InterviewState
@@ -52,24 +48,22 @@ def _checkpoint_uri(database_url: str) -> str:
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
-def _route_after_classification(state: InterviewState) -> str:
-    """Route to evaluation if answer is substantial, else directly to persistence."""
-    if state.get("next_action") == "evaluate_answer":
-        return "evaluate_substantial_answer"
-    return "persist_candidate_output"
-
-
 def _route_after_await(state: InterviewState) -> str:
-    """Route to barge-in handler if timed out, otherwise proceed to classification."""
+    """Route to barge-in handler if timed out, otherwise to the merged turn node."""
     if state.get("next_action") == "force_section_time_barge_in":
         return "force_section_time_barge_in"
-    return "classify_candidate_response"
+    return "interviewer_turn"
 
 
 def _route_after_candidate_persistence(state: InterviewState) -> str:
-    """Route to time check after an answer, else directly generate bot response."""
-    if state.get("next_action") == "check_time":
-        return "check_time_after_substantial_answer"
+    """Route to the staged/regenerated question, the closing, or a static reply."""
+    if state.get("bot_reply_text"):
+        return "persist_bot_output"
+    next_action = state.get("next_action")
+    if state.get("should_close") or next_action == "generate_closing":
+        return "generate_closing_message"
+    if next_action in {"answer_question", "generate_next_question"}:
+        return "generate_next_question"
     return "generate_bot_response"
 
 
@@ -78,13 +72,6 @@ def _route_after_static_response(state: InterviewState) -> str:
     if state.get("next_action") == "generate_question":
         return "generate_next_question"
     return "persist_bot_output"
-
-
-def _route_after_time_check(state: InterviewState) -> str:
-    """Route to closing if interview is over, otherwise generate next question."""
-    if state.get("next_action") == "generate_closing":
-        return "generate_closing_message"
-    return "generate_next_question"
 
 
 def _route_after_time_barge_in(state: InterviewState) -> str:
@@ -121,13 +108,8 @@ def build_interview_graph(checkpointer: Any | None = None) -> Any:
     builder.add_node("initialize_interview_context", initialize_interview_context)
     builder.add_node("deliver_opening", deliver_opening)
     builder.add_node("await_candidate_response", await_candidate_response)
-    builder.add_node("classify_candidate_response", classify_candidate_response)
-    builder.add_node("evaluate_substantial_answer", evaluate_substantial_answer)
+    builder.add_node("interviewer_turn", interviewer_turn)
     builder.add_node("persist_candidate_output", persist_candidate_output)
-    builder.add_node(
-        "check_time_after_substantial_answer",
-        check_time_after_substantial_answer,
-    )
     builder.add_node(
         "force_section_time_barge_in",
         force_section_time_barge_in,
@@ -153,35 +135,19 @@ def build_interview_graph(checkpointer: Any | None = None) -> Any:
         "await_candidate_response",
         _route_after_await,
         {
-            "classify_candidate_response": "classify_candidate_response",
+            "interviewer_turn": "interviewer_turn",
             "force_section_time_barge_in": "force_section_time_barge_in",
         },
     )
-    builder.add_conditional_edges(
-        "classify_candidate_response",
-        _route_after_classification,
-        {
-            "evaluate_substantial_answer": "evaluate_substantial_answer",
-            "persist_candidate_output": "persist_candidate_output",
-        },
-    )
-    builder.add_edge("evaluate_substantial_answer", "persist_candidate_output")
+    builder.add_edge("interviewer_turn", "persist_candidate_output")
     builder.add_conditional_edges(
         "persist_candidate_output",
         _route_after_candidate_persistence,
         {
-            "check_time_after_substantial_answer": (
-                "check_time_after_substantial_answer"
-            ),
-            "generate_bot_response": "generate_bot_response",
-        },
-    )
-    builder.add_conditional_edges(
-        "check_time_after_substantial_answer",
-        _route_after_time_check,
-        {
             "generate_next_question": "generate_next_question",
+            "generate_bot_response": "generate_bot_response",
             "generate_closing_message": "generate_closing_message",
+            "persist_bot_output": "persist_bot_output",
         },
     )
     builder.add_conditional_edges(

@@ -12,7 +12,7 @@ import logging
 import random
 import time
 from collections.abc import AsyncIterable
-from typing import Any
+from typing import Any, cast
 
 from livekit import agents, rtc
 from livekit.agents import (
@@ -30,6 +30,9 @@ from livekit.agents import (
 from livekit.plugins import deepgram
 
 from src.config.settings import settings
+from src.control.agents.nodes.classify_response import will_bypass_interviewer_llm
+from src.control.agents.state import InterviewState
+from src.control.agents.templates import choose_template_avoiding
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
 from src.utils.livekit import chunk_for_tts
 
@@ -256,6 +259,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._current_user_interim = ""
         self._closing_finalize_requested = False
         self._turn_lock = asyncio.Lock()
+        self._recent_fillers: list[str] = []
 
     def _mark_closed_from_state(self) -> bool:
         """
@@ -407,14 +411,21 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             self._agent_is_speaking = True
             self._awaiting_agent_reply = False
             if not self._timer_start_requested:
-                self._timer_start_requested = True
-                self._timer_start_task = asyncio.create_task(
-                    self._start_timer_after_first_speech()
-                )
+                state = self.bridge.state or {}
+                is_opening_turn = int(state.get("turn_number") or 1) <= 1 and str(
+                    state.get("bot_reply_type") or "opening"
+                ) in {"opening", ""}
+                if is_opening_turn:
+                    self._timer_start_requested = True
+                    self._timer_start_task = asyncio.create_task(
+                        self._start_timer_after_first_speech()
+                    )
             return
 
         if self._agent_is_speaking:
             self._mark_agent_speech_finished()
+            if not self._interview_closed and not self._awaiting_agent_reply:
+                self._schedule_delayed_silence(USER_AWAY_TIMEOUT_SECS)
             if self._interview_closed:
                 if not self._closing_finalize_requested:
                     asyncio.create_task(self._finalize_after_closing())
@@ -784,6 +795,75 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                     )
                 self._schedule_section_barge_watchdog()
 
+    def _choose_filler(self) -> str:
+        """
+        Pick a short, content-neutral acknowledgement that is safe before any kind
+        of candidate response, avoiding the few most recently spoken fillers.
+
+        Returns:
+            The chosen filler phrase.
+        """
+
+        filler = choose_template_avoiding(
+            "neutral_filler",
+            recent=self._recent_fillers,
+        )
+        self._recent_fillers = [*self._recent_fillers, filler][-4:]
+        return filler
+
+    async def _run_candidate_turn(
+        self,
+        candidate_text: str,
+        duration_ms: int | None,
+    ) -> tuple[str, bool]:
+        """
+        Resume the LangGraph workflow for one candidate turn under the turn lock.
+
+        Args:
+            candidate_text: The candidate's transcribed speech.
+            duration_ms: How long the candidate spoke, if known.
+
+        Returns:
+            A tuple of (reply_text, is_closing_reply).
+        """
+
+        async with self._turn_lock:
+            try:
+                reply_text = await self.bridge.submit_candidate_turn(
+                    candidate_text,
+                    duration_ms=duration_ms,
+                )
+                is_closing_reply = self._mark_closed_from_state()
+            except Exception:
+                logger.exception("LangGraph turn failed")
+                reply_text = (
+                    "I had a brief issue processing that response. "
+                    "Let's continue with the next question."
+                )
+                is_closing_reply = False
+        return reply_text, is_closing_reply
+
+    def _extract_candidate_text(self, chat_ctx: llm.ChatContext) -> str:
+        """Resolve the latest user transcript from chat context or live STT buffer."""
+
+        items = getattr(chat_ctx, "items", None) or []
+        for item in reversed(items):
+            if getattr(item, "role", None) == "user":
+                text = getattr(item, "text_content", None) or ""
+                cleaned = " ".join(str(text).split())
+                if cleaned:
+                    return cleaned
+        return " ".join(self._live_user_transcript.split())
+
+    async def _warm_speculative_turn(self, candidate_text: str) -> None:
+        try:
+            await self.bridge.warm_speculative_turn(candidate_text)
+        except Exception:
+            logger.exception(
+                "Speculative interviewer warmup failed",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
     async def llm_node(
         self,
         chat_ctx: llm.ChatContext,
@@ -794,8 +874,12 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         Generate assistant text by resuming the existing LangGraph workflow with
         the candidate's transcribed speech.
 
+        A short, content-neutral acknowledgement is spoken immediately while the
+        single merged interviewer-turn call runs concurrently, so the candidate
+        hears a human-like reply with no perceptible dead air before the question.
+
         Args:
-            chat_ctx: The chat context (unused directly).
+            chat_ctx: The chat context for preemptive or final user text.
             tools: Tools available (unused).
             model_settings: Model settings (unused).
 
@@ -805,9 +889,14 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         candidate_text = self._pending_user_text
         duration_ms = self._pending_duration_ms
+        is_final_turn = candidate_text is not None
 
-        self._pending_user_text = None
-        self._pending_duration_ms = None
+        if is_final_turn:
+            self._pending_user_text = None
+            self._pending_duration_ms = None
+        else:
+            candidate_text = self._extract_candidate_text(chat_ctx)
+            duration_ms = self._last_user_turn_duration_ms
 
         if self._interview_closed:
             return
@@ -815,21 +904,30 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if not candidate_text:
             return
 
+        if not is_final_turn:
+            if settings.PREEMPTIVE_GENERATION_ENABLED:
+                asyncio.create_task(self._warm_speculative_turn(candidate_text))
+            return
+
         try:
-            async with self._turn_lock:
-                try:
-                    reply_text = await self.bridge.submit_candidate_turn(
-                        candidate_text,
-                        duration_ms=duration_ms,
-                    )
-                    is_closing_reply = self._mark_closed_from_state()
-                except Exception:
-                    logger.exception("LangGraph turn failed")
-                    reply_text = (
-                        "I had a brief issue processing that response. "
-                        "Let's continue with the next question."
-                    )
-                    is_closing_reply = False
+            # Start the reasoning call first so it overlaps with the filler playout.
+            graph_task = asyncio.create_task(
+                self._run_candidate_turn(candidate_text, duration_ms)
+            )
+
+            preview_state = cast(
+                InterviewState,
+                {
+                    **(self.bridge.state or {}),
+                    "previous_candidate_response": candidate_text,
+                },
+            )
+            skip_filler = will_bypass_interviewer_llm(preview_state, candidate_text)
+            if settings.ENABLE_ACK_FILLER and not skip_filler:
+                for chunk in chunk_for_tts(self._choose_filler()):
+                    yield chunk
+
+            reply_text, is_closing_reply = await graph_task
 
             if not reply_text:
                 return
@@ -899,7 +997,6 @@ async def interview_agent(ctx: agents.JobContext) -> None:
             punctuate=True,
             smart_format=True,
             no_delay=True,
-            endpointing_ms=settings.DEEPGRAM_ENDPOINTING_MS,
             filler_words=True,
             vad_events=True,
             api_key=settings.DEEPGRAM_API_KEY or agents.NOT_GIVEN,
@@ -930,7 +1027,10 @@ async def interview_agent(ctx: agents.JobContext) -> None:
                 "resume_false_interruption": True,
                 "discard_audio_if_uninterruptible": True,
             },
-            preemptive_generation={"enabled": False},
+            preemptive_generation={
+                "enabled": settings.PREEMPTIVE_GENERATION_ENABLED,
+                "preemptive_tts": False,
+            },
         ),
         user_away_timeout=USER_AWAY_TIMEOUT_SECS,
     )

@@ -1,7 +1,7 @@
 """Static speech template banks for phase one.
 
-Every bank intentionally contains exactly ten variants. Template selection remains
-random while all control decisions stay deterministic and checkpointable.
+Each bank keeps a healthy template pool to reduce repetition while template
+selection stays random and checkpoint-safe.
 """
 
 from __future__ import annotations
@@ -20,6 +20,78 @@ OPENING = (
     "Hi {candidate_name}, I am glad you could join us. Let us begin with a brief introduction to your professional background.",
     "Welcome to your interview with {company_name}, {candidate_name}. First, please walk me through your experience and the work you have done so far.",
     "Hello {candidate_name}, thanks for joining today. To open the interview, could you share your professional background and recent experience?",
+)
+
+OPENING_RESUME_AWARE = (
+    "Hello {candidate_name}, welcome to your interview with {company_name}. I see you have worked with {resume_skills} — we will touch on some of that today. Could you tell me about your professional background?",
+    "Hi {candidate_name}, thank you for joining the {company_name} interview. I noticed {resume_skills} on your background — we will explore a few of those areas. To begin, could you walk me through your professional experience?",
+    "Welcome, {candidate_name}. It is good to have you here for your interview with {company_name}. I see experience with {resume_skills}, which aligns with what we will cover. Could you start with an overview of your background?",
+    "Hello {candidate_name}, and welcome. Before we dive in, I see you have worked with {resume_skills} — we will touch on some of that today. Please tell me about your professional journey.",
+    "Hi {candidate_name}, welcome to the interview for {company_name}. I see {resume_skills} in your experience, and we will cover related areas. Could you introduce yourself and describe your background?",
+    "Good to meet you, {candidate_name}. Welcome to your {company_name} interview. I noticed {resume_skills} in your profile — we will explore those topics. Please share an overview of your professional background.",
+    "Hello {candidate_name}. Thank you for being here for the {company_name} interview. I see you have worked with {resume_skills}, which we will discuss today. Could you tell me about your work experience?",
+    "Hi {candidate_name}, I am glad you could join us. I see {resume_skills} in your background — we will touch on some of that. Let us begin with a brief introduction to your professional experience.",
+    "Welcome to your interview with {company_name}, {candidate_name}. I noticed experience with {resume_skills}, and we will cover a few related areas. Please walk me through your background and recent work.",
+    "Hello {candidate_name}, thanks for joining today. I see you have worked with {resume_skills} — we will explore some of that during our conversation. Could you share your professional background?",
+)
+
+NEUTRAL_FILLER = (
+    "Okay.",
+    "Alright.",
+    "Right.",
+    "Mm-hmm.",
+    "Okay, let me see.",
+    "Let me think about that for a second.",
+    "Right, one moment.",
+    "Okay, just a moment.",
+    "Alright, let me see.",
+    "Let me see.",
+    "Understood.",
+    "Got it.",
+    "I see.",
+    "All right, one second.",
+    "Okay, I am with you.",
+    "Right, I hear you.",
+    "Sure, one moment.",
+    "All right, give me a second.",
+    "Okay, understood.",
+    "Thanks, one moment.",
+    "All right.",
+    "Right, got it.",
+    "Okay, let me check.",
+    "I hear you.",
+    "All right, understood.",
+    "Right, I understand.",
+    "Okay, right.",
+    "Sure.",
+    "Mm, okay.",
+    "All right, let us continue.",
+    "Okay, I have that.",
+    "Right, thank you.",
+    "Okay, just a second.",
+    "All right, one moment.",
+    "I understand.",
+    "Right, understood.",
+    "Okay then.",
+    "All right then.",
+    "Sure, let me think.",
+    "Okay, let me process that.",
+    "Right, let me process that.",
+    "All right, thank you.",
+    "I have that.",
+    "Right, all good.",
+    "Okay, all right.",
+    "Understood, one second.",
+    "All right, I have it.",
+    "Okay, I hear you.",
+    "Right, I have that.",
+    "Sure, understood.",
+    "Okay, noted.",
+    "All right, noted.",
+    "Right, noted.",
+    "Okay, thank you.",
+    "All right, thanks.",
+    "Right, thanks.",
 )
 
 SILENCE_OFFER = (
@@ -202,6 +274,56 @@ SUBSTANTIAL_ACKNOWLEDGEMENT = (
     "Thank you for explaining that. Let us proceed.",
     "I have noted your answer. Thank you.",
     "Thanks. That gives me a clear enough picture to move forward.",
+    "Thank you. That was clear and useful context.",
+    "Thanks for the detail. We can continue to the next point.",
+    "I appreciate that explanation. Let us move ahead.",
+    "That is helpful, thank you. We will continue.",
+    "Thanks, that gives me what I need for this part.",
+    "Understood, thank you. Let us proceed.",
+    "I appreciate the context you shared. We can move on.",
+    "Thank you for the thoughtful response. Let us continue.",
+    "That was clear. Thank you, we can continue.",
+    "Thanks, I have captured that. Let us move forward.",
+    "I understand your approach. Thank you.",
+    "Thank you for covering that in detail.",
+    "That is useful input. Thanks, let us continue.",
+    "Appreciate the detail there. We can proceed.",
+    "Thanks for that context. Moving ahead.",
+    "Understood. That answer is noted.",
+    "I appreciate your explanation. Let us go on.",
+    "Thank you, that is clear enough to proceed.",
+    "Thanks for walking through that example.",
+    "That helps, thank you. We will continue.",
+    "I have enough detail from that response. Thank you.",
+    "Thank you for the clarity there.",
+    "Thanks, that is a solid explanation.",
+    "I appreciate the way you explained that. Let us continue.",
+    "Understood, that gives good context.",
+    "Thanks for the complete response.",
+    "That was helpful and specific. Thank you.",
+    "I have noted that clearly. Thanks.",
+    "Thanks, that answers the question well enough to proceed.",
+    "I appreciate that detail. Let us move to the next area.",
+    "Thank you for sharing that approach.",
+    "That is clear, thank you.",
+    "Thanks for that walkthrough.",
+    "Understood, that is helpful.",
+    "Thank you, we can continue from here.",
+    "Thanks, I have captured the key points.",
+    "That is good context, thank you.",
+    "I appreciate the depth there. Let us proceed.",
+    "Thank you for the practical explanation.",
+    "Thanks, that gives me a clear view.",
+    "Understood, that response is noted.",
+    "Thank you for breaking that down.",
+    "Thanks for the useful detail.",
+    "I appreciate that answer. We can continue.",
+    "Thank you, that was well explained.",
+    "Thanks, this gives enough signal to move forward.",
+    "Understood, thank you for the context.",
+    "I have captured your response, thank you.",
+    "Thanks, that is helpful for assessment.",
+    "Thank you, let us continue.",
 )
 
 QUESTION_DOUBT_FALLBACK = (
@@ -228,19 +350,59 @@ QUESTION_GENERATION_FALLBACK_ACKNOWLEDGEMENT = (
     "Thank you for that context. We will continue with another question.",
     "I understand your perspective. Let us move forward.",
     "Thank you for describing that. Let us continue with the interview.",
+    "Thanks for that context. We can continue from here.",
+    "I have noted your response. Let us move to the next question.",
+    "Appreciate the explanation. We will continue.",
+    "Thank you for sharing that detail. Let us proceed.",
+    "That was helpful context. Let us keep going.",
+    "I have captured your point. Let us continue.",
+    "Thanks for walking me through that. We will move ahead.",
+    "Understood, thank you. Let us continue.",
+    "I appreciate that response. We can move to the next one.",
+    "Thank you, that is useful. Let us continue.",
+    "I have what I need from that answer. Let us proceed.",
+    "Thanks, we can now move to another area.",
+    "That gives good context. Let us continue.",
+    "Understood. We can move forward.",
+    "I appreciate the detail there. Let us proceed.",
+    "Thanks for explaining your thinking. Let us continue.",
+    "That is clear, thank you. We will continue.",
+    "I have recorded that response. Let us move ahead.",
+    "Thank you for the clarification. Let us continue.",
+    "Thanks, that helps. We can proceed.",
+    "Understood, that is noted. Let us continue.",
+    "I appreciate your perspective. Let us move forward.",
+    "Thanks for sharing that example. Let us continue.",
+    "That response is captured. Let us proceed.",
+    "Thank you, we can move to the next question.",
+    "I have noted that well. Let us continue.",
+    "Thanks, let us continue with the interview.",
+    "Understood. We will move to the next part.",
+    "Thank you for that explanation. We can proceed.",
+    "I appreciate that context. Let us continue.",
+    "Thanks, this is helpful. Let us move on.",
+    "Noted, thank you. We can continue.",
+    "I have captured your answer. Let us proceed.",
+    "Thank you for sharing your approach. Let us continue.",
+    "That is useful detail. We can move ahead.",
+    "Understood. Thank you, let us continue.",
+    "Thanks, we will proceed to the next point.",
+    "I appreciate that answer. Let us keep going.",
+    "Thank you, that is clear. Let us continue.",
+    "I have enough context from that. Let us proceed.",
 )
 
 TECHNICAL_QUESTION_FALLBACK = (
-    "What foundational concept in {skill} is especially important for writing reliable applications?",
-    "How would you explain a common mistake developers make when first using {skill}?",
-    "How would you debug an unexpected failure in a {skill} application?",
-    "What trade-off would you evaluate before changing the design of a {skill} component?",
-    "How would you verify that a {skill} solution behaves correctly under failure conditions?",
-    "What common production failure would you watch for in a system built with {skill}?",
-    "How would you improve error handling in a {skill} application?",
-    "What would you inspect first when a {skill} application becomes unexpectedly slow?",
-    "How would increased traffic affect the design of a production {skill} system?",
-    "What reliability risk deserves the most attention in a large {skill} system?",
+    "When would {concept} become a bottleneck in a production {skill} service?",
+    "What failure symptom would first suggest a {concept} issue in {skill}?",
+    "How would you isolate whether a bug comes from {concept} or surrounding {skill} code?",
+    "Which trade-off between speed and safety matters most for {concept} in {skill}?",
+    "What invariant would you enforce to prevent {concept} regressions in {skill}?",
+    "How would you test {concept} behavior before shipping a {skill} change?",
+    "What metric would you watch to catch early {concept} problems in {skill}?",
+    "When a {skill} incident involves {concept}, what is your first diagnostic step?",
+    "How would higher load change your approach to {concept} in {skill}?",
+    "What design choice around {concept} most affects {skill} reliability at scale?",
 )
 
 BEHAVIOURAL_QUESTION_FALLBACK = (
@@ -295,6 +457,19 @@ BARGE_IN_TRANSITION = (
     "We are running short of time, so I will move us forward to {next_section}.",
 )
 
+BEHAVIOURAL_FORCED_TRANSITION = (
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+    "Due to lack of time lets move to the behavioural section.",
+)
+
 CLOSING = (
     "Thank you for completing your interview with {company_name}. We appreciate the time and thought you shared today. Your responses have been submitted, and the recruiting team will handle the next steps.",
     "Thank you for completing your interview with {company_name}. I appreciate your time today. Your interview is now submitted, and you will hear about any next steps through the recruiting team.",
@@ -310,7 +485,9 @@ CLOSING = (
 
 
 _BANKS = {
+    "neutral_filler": NEUTRAL_FILLER,
     "opening": OPENING,
+    "opening_resume_aware": OPENING_RESUME_AWARE,
     "silence_offer": SILENCE_OFFER,
     "think_wait": THINK_WAIT,
     "think_declined": THINK_DECLINED,
@@ -334,11 +511,14 @@ _BANKS = {
     "section_transition": SECTION_TRANSITION,
     "timed_section_transition": TIMED_SECTION_TRANSITION,
     "barge_in_transition": BARGE_IN_TRANSITION,
+    "behavioural_forced_transition": BEHAVIOURAL_FORCED_TRANSITION,
     "closing": CLOSING,
 }
 
-if any(len(bank) != 10 for bank in _BANKS.values()):
-    raise RuntimeError("Every interview static template bank must have 10 variants")
+if any(len(bank) < 10 for bank in _BANKS.values()):
+    raise RuntimeError(
+        "Every interview static template bank must have at least 10 variants"
+    )
 
 
 def choose_template(name: str, **values: Any) -> str:

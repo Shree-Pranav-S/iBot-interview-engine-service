@@ -6,6 +6,7 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from src.control.agents.key_routing import compute_turn_key_slot
 from src.control.agents.nodes.turn_utils import build_candidate_turn
 from src.control.agents.state import InterviewState
 from src.utils.interview_graph import utc_now_iso
@@ -95,10 +96,12 @@ def await_candidate_response(state: InterviewState) -> dict[str, Any]:
         "candidate_event": event,
         "previous_candidate_response": text,
         "previous_response_duration_ms": duration_ms,
+        "speculative_interviewer_result": event.get("speculative_interviewer_result"),
+        "llm_key_slot": compute_turn_key_slot(state),
         "pending_candidate_turn": pending_candidate_turn,
         "bot_reply_text": "",
         "bot_reply_type": "",
         "next_action": (
-            "force_section_time_barge_in" if is_time_barge_in else "classify_response"
+            "force_section_time_barge_in" if is_time_barge_in else "interviewer_turn"
         ),
     }

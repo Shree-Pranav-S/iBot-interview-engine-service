@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
+from src.control.agents.key_routing import active_turn_key_slot
+from src.control.agents.nodes.apply_question import apply_resolved_question
 from src.control.agents.nodes.llm_helpers import generate_with_schema
+from src.control.agents.nodes.question_diversity import (
+    framing_hint,
+    recent_question_stems,
+    validate_generated_question,
+    validate_unique_question,
+)
 from src.control.agents.nodes.question_strategy import (
     determine_question_difficulty,
     target_section,
 )
-from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.prompts import (
     BEHAVIOURAL_QUESTION_GENERATION_SYSTEM_PROMPT,
     TECHNICAL_QUESTION_GENERATION_SYSTEM_PROMPT,
@@ -29,58 +35,32 @@ from src.schemas.prompts import (
 
 logger = logging.getLogger(__name__)
 
+_FALLBACK_CONCEPTS = (
+    "memory lifecycle",
+    "concurrency hazard",
+    "schema migration risk",
+    "connection pooling",
+    "error propagation",
+    "caching consistency",
+    "input validation gap",
+    "deployment rollback",
+    "observability signal",
+    "resource leak",
+)
 
-def _normalized_question(value: str) -> str:
-    """
-    Normalize question text for structural comparison by removing punctuation
-    and converting to lowercase alphanumeric tokens.
 
-    Args:
-        value: The raw question string.
+def _fallback_concept_for_skill(state: InterviewState, skill: str) -> str:
+    """Pick an unused fallback concept for this skill (last-resort path only)."""
 
-    Returns:
-        A normalized string.
-    """
-    return " ".join(re.findall(r"[a-z0-9+#.]+", value.casefold()))
-
-
-def _question_tokens(value: str) -> set[str]:
-    """
-    Extract meaningful keywords from a question by stripping out common stop words.
-
-    Args:
-        value: The raw question string.
-
-    Returns:
-        A set of keyword tokens.
-    """
-    stop_words = {
-        "a",
-        "an",
-        "and",
-        "can",
-        "could",
-        "describe",
-        "do",
-        "explain",
-        "how",
-        "in",
-        "is",
-        "of",
-        "the",
-        "to",
-        "what",
-        "when",
-        "with",
-        "would",
-        "you",
-        "your",
+    asked = _questions_for_skill(state, skill)
+    used_topics = {
+        str(topic).casefold()
+        for topic in (state.get("used_topics_by_skill") or {}).get(skill.casefold(), [])
     }
-    return {
-        token
-        for token in _normalized_question(value).split()
-        if token not in stop_words
-    }
+    for concept in _FALLBACK_CONCEPTS:
+        if concept.casefold() not in used_topics:
+            return concept
+    return _FALLBACK_CONCEPTS[len(asked) % len(_FALLBACK_CONCEPTS)]
 
 
 def _questions_for_skill(
@@ -182,6 +162,8 @@ def _technical_messages(
     """
     asked = _questions_for_skill(state, skill)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
+    sequence_number = len(state.get("asked_questions") or []) + 1
+    seed = str(state.get("question_variation_seed") or "")
     context = {
         "current_technical_skill": skill,
         "inferred_difficulty": state.get("inferred_difficulty"),
@@ -200,7 +182,9 @@ def _technical_messages(
         ),
         "probe_deeper": probe_deeper,
         "question_variation_seed": state.get("question_variation_seed"),
-        "question_sequence_number": len(state.get("asked_questions") or []) + 1,
+        "question_sequence_number": sequence_number,
+        "question_framing_hint": framing_hint(seed, sequence_number),
+        "recent_question_stems": recent_question_stems(state),
         "recent_acknowledgements": _recent_acknowledgements(state),
         "questions_already_asked_for_skill": [
             item.get("question_text") for item in asked
@@ -242,6 +226,8 @@ def _behavioural_messages(
     """
     asked = _behavioural_questions(state)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
+    sequence_number = len(state.get("asked_questions") or []) + 1
+    seed = str(state.get("question_variation_seed") or "")
     context = {
         "expected_signals": expected_signals,
         "previous_question": (
@@ -251,7 +237,9 @@ def _behavioural_messages(
             None if suppress_previous else state.get("previous_candidate_response")
         ),
         "question_variation_seed": state.get("question_variation_seed"),
-        "question_sequence_number": len(state.get("asked_questions") or []) + 1,
+        "question_sequence_number": sequence_number,
+        "question_framing_hint": framing_hint(seed, sequence_number),
+        "recent_question_stems": recent_question_stems(state),
         "recent_acknowledgements": _recent_acknowledgements(state),
         "questions_already_asked": [item.get("question_text") for item in asked],
         "signals_already_used": [
@@ -268,41 +256,6 @@ def _behavioural_messages(
             "content": json.dumps(context, ensure_ascii=False, default=str),
         },
     ]
-
-
-def _validate_unique_question(
-    question_text: str,
-    asked_questions: list[dict[str, Any]],
-    *,
-    allow_related_probe: bool = False,
-) -> None:
-    """
-    Ensure the LLM did not accidentally generate a question it has already asked.
-    Checks for exact structural matches and high token overlap.
-
-    Args:
-        question_text: The newly generated question.
-        asked_questions: Previously asked questions in this category.
-        allow_related_probe: If True, relaxes the token-overlap check since follow-ups
-            naturally share vocabulary with the parent question.
-
-    Raises:
-        ValueError: If the question is too similar to a past question.
-    """
-    normalized = _normalized_question(question_text)
-    new_tokens = _question_tokens(question_text)
-    for item in asked_questions:
-        prior_text = str(item.get("question_text") or "")
-        if normalized == _normalized_question(prior_text):
-            raise ValueError("question generator repeated a previous question")
-        if allow_related_probe:
-            continue
-        prior_tokens = _question_tokens(prior_text)
-        union = new_tokens | prior_tokens
-        if union and len(new_tokens & prior_tokens) / len(union) >= 0.80:
-            raise ValueError(
-                "question generator lightly paraphrased a previous question"
-            )
 
 
 async def _generate_technical(
@@ -338,11 +291,26 @@ async def _generate_technical(
         result = await generate_with_schema(
             messages,
             TechnicalQuestionGenerationResponse,
+            key_slot=active_turn_key_slot(state),
         )
         if result.difficulty != target_difficulty:
             raise ValueError("question generator changed deterministic difficulty")
         if result.probe_deeper is not probe_deeper:
             raise ValueError("question generator changed deterministic probe flag")
+        validate_generated_question(
+            question_text=result.question_text,
+            topic=result.topic,
+            skill=skill,
+            asked_questions=asked,
+            used_topics=list(
+                (state.get("used_topics_by_skill") or {}).get(skill.casefold(), [])
+            ),
+            allow_related_probe=probe_deeper,
+        )
+        logger.info(
+            "Technical question generated by LLM",
+            extra={"question_source": "llm", "skill": skill},
+        )
         return result
     except Exception as exc:
         logger.warning(
@@ -350,10 +318,20 @@ async def _generate_technical(
             exc,
         )
 
-    fallback_topic = f"{skill} fundamentals"
+    fallback_concept = _fallback_concept_for_skill(state, skill)
+    logger.warning(
+        "Using per-skill fallback question",
+        extra={
+            "question_source": "fallback",
+            "skill": skill,
+            "concept": fallback_concept,
+        },
+    )
+    fallback_topic = fallback_concept
     candidates = template_variants(
         "technical_question_fallback",
         skill=skill,
+        concept=fallback_concept,
         signal=fallback_topic,
     )
     difficulty_indices = {
@@ -400,8 +378,18 @@ async def _generate_behavioural(
         result = await generate_with_schema(
             messages,
             BehaviouralQuestionGenerationResponse,
+            key_slot=active_turn_key_slot(state),
         )
-        _validate_unique_question(result.question_text, asked)
+        validate_generated_question(
+            question_text=result.question_text,
+            topic=result.signal_focus,
+            skill="",
+            asked_questions=asked,
+            used_topics=[
+                str(item.get("topic") or "") for item in asked if item.get("topic")
+            ],
+            allow_related_probe=False,
+        )
         return result
     except Exception as exc:
         logger.warning(
@@ -419,7 +407,7 @@ async def _generate_behavioural(
         signal=signal,
     ):
         try:
-            _validate_unique_question(question, asked)
+            validate_unique_question(question, asked)
         except ValueError:
             continue
         return BehaviouralQuestionGenerationResponse(
@@ -464,166 +452,131 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
             or entering_new_section
         ),
     }
+    # The merged interviewer-turn node may have already produced this question in the
+    # same call that classified and evaluated the answer. When present and valid, it
+    # is applied directly so no second model round trip is needed.
+    pregenerated = state.get("pregenerated_question") or None
+    preface = str(state.get("response_preface_text") or "").strip()
+    follow_interesting_thread = False
+    probe_deeper = False
     if section_kind == "technical":
         skill = str(section.get("skill") or section_name)
-        difficulty, probe_deeper = determine_question_difficulty(
-            state,
-            skill=skill,
-            entering_new_section=entering_new_section,
-        )
-        generated = await _generate_technical(
-            generation_state,
-            skill=skill,
-            target_difficulty=difficulty,
-            probe_deeper=probe_deeper,
-        )
-        acknowledgement = (
-            str(state.get("response_preface_text") or "").strip()
-            or generated.acknowledgement
-        )
-        question_text = generated.question_text
-        topic = generated.topic
         current_skill: str | None = skill
-        current_difficulty: Difficulty | None = difficulty
+        used_pregenerated = False
+        if pregenerated and str(pregenerated.get("question_text") or "").strip():
+            candidate_question = str(pregenerated["question_text"]).strip()
+            try:
+                topic_candidate = (
+                    str(pregenerated.get("topic") or "").strip()
+                    or f"{skill} fundamentals"
+                )
+                validate_generated_question(
+                    question_text=candidate_question,
+                    topic=topic_candidate,
+                    skill=skill,
+                    asked_questions=_questions_for_skill(state, skill),
+                    used_topics=list(
+                        (state.get("used_topics_by_skill") or {}).get(
+                            skill.casefold(),
+                            [],
+                        )
+                    ),
+                    allow_related_probe=bool(pregenerated.get("probe_deeper")),
+                )
+                acknowledgement = (
+                    preface or str(pregenerated.get("acknowledgement") or "").strip()
+                )
+                question_text = candidate_question
+                topic = topic_candidate
+                current_difficulty: Difficulty | None = (
+                    pregenerated.get("difficulty")
+                    or determine_question_difficulty(
+                        state,
+                        skill=skill,
+                        entering_new_section=entering_new_section,
+                    )[0]
+                )
+                probe_deeper = bool(pregenerated.get("probe_deeper"))
+                follow_interesting_thread = bool(
+                    pregenerated.get("follow_interesting_thread")
+                )
+                used_pregenerated = True
+            except ValueError as exc:
+                logger.info(
+                    "Pregenerated technical question rejected; regenerating: %s",
+                    exc,
+                )
+        if not used_pregenerated:
+            difficulty, probe_deeper = determine_question_difficulty(
+                state,
+                skill=skill,
+                entering_new_section=entering_new_section,
+            )
+            generated = await _generate_technical(
+                generation_state,
+                skill=skill,
+                target_difficulty=difficulty,
+                probe_deeper=probe_deeper,
+            )
+            acknowledgement = preface or generated.acknowledgement
+            question_text = generated.question_text
+            topic = generated.topic
+            current_difficulty = difficulty
+            follow_interesting_thread = False
     else:
-        generated_behavioural = await _generate_behavioural(
-            generation_state,
-            expected_signals=expected_signals,
-        )
-        acknowledgement = (
-            str(state.get("response_preface_text") or "").strip()
-            or generated_behavioural.acknowledgement
-        )
-        question_text = generated_behavioural.question_text
-        topic = generated_behavioural.signal_focus
         current_skill = None
         current_difficulty = None
         probe_deeper = False
+        used_pregenerated = False
+        if pregenerated and str(pregenerated.get("question_text") or "").strip():
+            candidate_question = str(pregenerated["question_text"]).strip()
+            try:
+                topic_candidate = (
+                    str(pregenerated.get("topic") or "").strip() or "behavioural signal"
+                )
+                validate_generated_question(
+                    question_text=candidate_question,
+                    topic=topic_candidate,
+                    skill="",
+                    asked_questions=_behavioural_questions(state),
+                    used_topics=[
+                        str(item.get("topic") or "")
+                        for item in _behavioural_questions(state)
+                        if item.get("topic")
+                    ],
+                    allow_related_probe=False,
+                )
+                acknowledgement = (
+                    preface or str(pregenerated.get("acknowledgement") or "").strip()
+                )
+                question_text = candidate_question
+                topic = topic_candidate
+                follow_interesting_thread = bool(
+                    pregenerated.get("follow_interesting_thread")
+                )
+                used_pregenerated = True
+            except ValueError as exc:
+                logger.info(
+                    "Pregenerated behavioural question rejected; regenerating: %s",
+                    exc,
+                )
+        if not used_pregenerated:
+            generated_behavioural = await _generate_behavioural(
+                generation_state,
+                expected_signals=expected_signals,
+            )
+            acknowledgement = preface or generated_behavioural.acknowledgement
+            question_text = generated_behavioural.question_text
+            topic = generated_behavioural.signal_focus
+            follow_interesting_thread = False
 
-    question_id = (
-        f"{state['interview_session_id']}:question:"
-        f"{len(state.get('asked_questions') or []) + 1}"
-    )
-    spoken_text = f"{acknowledgement} {question_text}".strip()
-    section_budgets = state.get("section_budgets_secs") or {}
-    section_budget = int(section_budgets.get(str(section_index), 60))
-    section_started_elapsed = (
-        int(state.get("elapsed_secs") or 0)
-        if entering_new_section
-        else int(state.get("current_section_started_elapsed_secs") or 0)
-    )
-    section_elapsed = max(
-        0,
-        int(state.get("elapsed_secs") or 0) - section_started_elapsed,
-    )
-    runtime_sections = list(state.get("runtime_sections") or [])
-    future_reserved = sum(
-        max(0, int(section_budgets.get(str(index)) or 0))
-        for index, future_section in enumerate(runtime_sections)
-        if index > section_index
-        and future_section.get("section_kind")
-        in {
-            "technical",
-            "behavioural_cultural",
-        }
-    )
-    total_duration = max(1, int(state.get("total_duration_secs") or 1))
-    protected_deadline = (
-        total_duration - future_reserved if future_reserved > 0 else total_duration
-    )
-    section_deadline = max(
-        0,
-        min(section_started_elapsed + section_budget, protected_deadline),
-    )
-    section_remaining = max(
-        0,
-        min(
-            section_budget - section_elapsed,
-            section_deadline - int(state.get("elapsed_secs") or 0),
-        ),
-    )
-    next_state: InterviewState = {
-        **state,
-        "current_section": section_name,
-        "current_section_index": section_index,
-        "current_section_kind": section_kind,  # type: ignore[typeddict-item]
-        "current_technical_skill": current_skill,
-        "current_expected_signals": expected_signals,
-        "current_question_id": question_id,
-        "current_question_text": question_text,
-        "last_rephrased_question": None,
-        "current_question_difficulty": current_difficulty,
-        "is_self_introduction": False,
-        "current_section_budget_secs": section_budget,
-        "current_section_started_elapsed_secs": section_started_elapsed,
-        "current_section_elapsed_secs": section_elapsed,
-        "current_section_remaining_secs": section_remaining,
-        "reserved_future_section_secs": future_reserved,
-        "current_section_transition_deadline_elapsed_secs": (section_deadline),
-    }
-    pending_bot_turn = build_bot_turn(
-        next_state,
-        text=spoken_text,
-        question_type="new_question",
-        question_text=question_text,
+    return apply_resolved_question(
+        state,
         acknowledgement=acknowledgement,
+        question_text=question_text,
         topic=topic,
+        current_skill=current_skill,
+        current_difficulty=current_difficulty,
+        probe_deeper=probe_deeper,
+        follow_interesting_thread=follow_interesting_thread,
     )
-    question_record = {
-        "question_id": question_id,
-        "question_text": question_text,
-        "difficulty": current_difficulty,
-        "skill": current_skill,
-        "section": section_name,
-        "topic": topic,
-        "acknowledgement": acknowledgement,
-    }
-    asked_questions = [
-        *list(state.get("asked_questions") or []),
-        question_record,
-    ]
-    used_topics = {
-        key: list(value)
-        for key, value in (state.get("used_topics_by_skill") or {}).items()
-    }
-    if current_skill:
-        used_topics.setdefault(current_skill.casefold(), []).append(topic)
-    return {
-        "current_section": section_name,
-        "current_section_index": section_index,
-        "current_section_kind": section_kind,
-        "current_technical_skill": current_skill,
-        "current_expected_signals": expected_signals,
-        "current_question_id": question_id,
-        "current_question_text": question_text,
-        "last_rephrased_question": None,
-        "current_question_difficulty": current_difficulty,
-        "is_self_introduction": False,
-        "probe_deeper": probe_deeper,
-        "asked_questions": asked_questions,
-        "used_topics_by_skill": used_topics,
-        "current_section_budget_secs": section_budget,
-        "current_section_started_elapsed_secs": section_started_elapsed,
-        "current_section_elapsed_secs": section_elapsed,
-        "current_section_remaining_secs": max(
-            0,
-            section_remaining,
-        ),
-        "reserved_future_section_secs": future_reserved,
-        "current_section_transition_deadline_elapsed_secs": section_deadline,
-        "pending_section_index": None,
-        "suppress_previous_context_for_next_question": False,
-        "transition_reason": None,
-        "barge_in_triggered": False,
-        "bot_reply_text": spoken_text,
-        "bot_reply_type": "new_question",
-        "pending_bot_turn": pending_bot_turn,
-        "response_preface_text": None,
-        "skip_attempts_for_current_question": 0,
-        "self_intro_elaboration_requested": False,
-        "should_advance_question": False,
-        "phase_complete": False,
-        "latest_evaluation": None,
-        "next_action": "await_candidate_response",
-        "silence_stage": "none",
-    }

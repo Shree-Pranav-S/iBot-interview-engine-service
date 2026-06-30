@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any
 
+from src.control.agents.key_routing import active_turn_key_slot
 from src.control.agents.nodes.llm_helpers import classify_with_schema
 from src.control.agents.prompts import CLASSIFICATION_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
@@ -26,11 +27,12 @@ REPHRASE_PATTERN = re.compile(
     r"\b((?:can|could|would|will) you (?:please )?rephrase|please rephrase|"
     r"rephrase (?:it|that|this|the question)|"
     r"phrase (?:it|that) differently|put (?:it|that) another way|"
-    r"simplify (?:it|that|the question)|make the question (?:simpler|clearer))\b",
+    r"simplify (?:it|that|the question)|make the question (?:simpler|clearer)|say (?:it|that) (?:differently|in simpler words)|(?:didn(?:'|')?t|did not) understand)\b",
     re.IGNORECASE,
 )
 SKIP_PATTERN = re.compile(
-    r"\b(skip (?:it|this|that|the question)|pass (?:on )?(?:it|this|that)|"
+    r"\b(skip (?:it|this|that|the question)|"
+    r"pass on (?:it|this|that|the question)|"
     r"move (?:on|to the next question)|next question|"
     r"i (?:do not|don't|dont) know(?: the answer)?|"
     r"i (?:cannot|can't|cant) answer|no idea)\b",
@@ -43,7 +45,7 @@ THINK_PATTERN = re.compile(
     r"(?:think|consider|prepare|gather my thoughts)\b|"
     r"\b(?:can|could|may)\s+i\s+(?:take|have|get)\s+"
     r"(?:a|some|a few)?\s*(?:moment|time|seconds?|minute)\s+"
-    r"(?:to\s+)?(?:think|consider|prepare)\b|"
+    r"(?:to\s+)?(?:think|consider|prepare)\b|\b(?:hold on|give me a (?:moment|second)|let me think)\b|"
     r"\b(?:give me|can i have|could i have|may i have)\s+"
     r"(?:a|one|some)?\s*(?:moment|minute|few seconds)\b",
     re.IGNORECASE,
@@ -66,20 +68,30 @@ YEARS_OF_EXPERIENCE_PATTERN = re.compile(
     r"(?:professional\s+|work\s+|industry\s+)?experience\b",
     re.IGNORECASE,
 )
-SELF_INTRO_PROFESSIONAL_PATTERN = re.compile(
-    r"\b(?:background|career|education|experience|professional|"
-    r"work(?:ed|ing)?|roles?|developers?|engineers?|projects?|skills?|"
-    r"technology|technologies|frameworks?|responsibilit(?:y|ies)|"
-    r"proficien(?:t|cy)|speciali[sz](?:e|ed|ation)|currently)\b",
-    re.IGNORECASE,
-)
 SELF_INTRO_ELABORATION_WORD_THRESHOLD = 15
+BEHAVIOURAL_ANSWER_WORD_THRESHOLD = 15
+BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD = 20
+DETERMINISTIC_CLASSIFICATION_SOURCES = frozenset(
+    {
+        "deterministic",
+        "deterministic_self_intro",
+        "deterministic_behavioural",
+    }
+)
 QUESTION_LIKE_ANSWER_PATTERN = re.compile(
     r"^\s*(?:when you say|what do you mean|do you mean|did you mean|"
     r"are you asking|should i|would you like|does that include|"
     r"is the question|can you clarify|could you clarify)\b",
     re.IGNORECASE,
 )
+IRRELEVANT_TOPIC_PATTERN = re.compile(
+    r"\b(?:weather|lunch|dinner|weekend|football|cricket|movie|netflix|"
+    r"boyfriend|girlfriend|married|kids?|politics|religion|salary|pay|"
+    r"wifi|internet (?:is )?down|cannot hear|can(?:'|')?t hear|audio (?:issue|problem)|"
+    r"tell me the answer|give me the answer|what is the correct answer)\b",
+    re.IGNORECASE,
+)
+
 CONTENT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:[+#.-][a-z0-9]+)*")
 CLASSIFICATION_STOP_WORDS = frozenset(
     {
@@ -142,6 +154,41 @@ def _spoken_word_count(text: str) -> int:
     return len(re.findall(r"\b[\w+#.-]+\b", text))
 
 
+def is_deterministic_classification_source(source: str | None) -> bool:
+    """Return True when a turn was classified without the merged interviewer LLM."""
+
+    return str(source or "") in DETERMINISTIC_CLASSIFICATION_SOURCES
+
+
+def _is_developed_spoken_answer(text: str, *, min_words: int = 10) -> bool:
+    """Detect longer answer attempts that should not match clarification regexes."""
+
+    if _spoken_word_count(text) < min_words:
+        return False
+    return not (
+        text.rstrip().endswith("?") or QUESTION_LIKE_ANSWER_PATTERN.search(text)
+    )
+
+
+def will_bypass_interviewer_llm(state: InterviewState, text: str) -> bool:
+    """Mirror interviewer_turn pre-LLM routing for filler suppression."""
+
+    det = _deterministic_classification(state, text)
+    if det is not None and det.get("response_type") in (
+        "silence",
+        "irrelevant",
+        "clarification",
+    ):
+        return True
+    if bool(state.get("is_self_introduction")):
+        return True
+    word_count = _spoken_word_count(text)
+    return (
+        state.get("current_section_kind") == "behavioural_cultural"
+        and word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD
+    )
+
+
 def _content_tokens(text: str) -> set[str]:
     """Return meaningful lowercase tokens for conservative relevance matching."""
 
@@ -198,6 +245,26 @@ def _result(
     }
 
 
+def _is_likely_irrelevant(state: InterviewState, text: str) -> bool:
+    """Conservative off-topic detection before an LLM round trip."""
+
+    if IRRELEVANT_TOPIC_PATTERN.search(text):
+        return True
+    word_count = _spoken_word_count(text)
+    if word_count <= 2:
+        return False
+    question_tokens = _content_tokens(str(state.get("current_question_text") or ""))
+    response_tokens = _content_tokens(text)
+    if not question_tokens or not response_tokens:
+        return False
+    overlap = len(question_tokens & response_tokens)
+    if word_count >= 8 and overlap == 0:
+        return True
+    return (
+        word_count >= 12 and overlap <= 1 and not _is_clear_relevant_answer(state, text)
+    )
+
+
 def _deterministic_classification(
     state: InterviewState,
     text: str,
@@ -235,7 +302,7 @@ def _deterministic_classification(
                 is_substantial=None,
             )
 
-    if SKIP_PATTERN.search(text):
+    if SKIP_PATTERN.search(text) and not _is_developed_spoken_answer(text):
         return _result(
             response_type="clarification",
             clarification_type="skip_question",
@@ -262,18 +329,30 @@ def _deterministic_classification(
 
     if bool(state.get("is_self_introduction")):
         word_count = _spoken_word_count(text)
-        has_professional_detail = bool(SELF_INTRO_PROFESSIONAL_PATTERN.search(text))
-        if word_count >= 18 or (word_count >= 6 and has_professional_detail):
+        return _result(
+            response_type="answer",
+            clarification_type=None,
+            is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
+        )
+    if state.get("current_section_kind") == "behavioural_cultural":
+        word_count = _spoken_word_count(text)
+        if word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD:
             return _result(
                 response_type="answer",
                 clarification_type=None,
-                is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
+                is_substantial=(word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD),
             )
     if _is_clear_relevant_answer(state, text):
         return _result(
             response_type="answer",
             clarification_type=None,
             is_substantial=True,
+        )
+    if _is_likely_irrelevant(state, text):
+        return _result(
+            response_type="irrelevant",
+            clarification_type=None,
+            is_substantial=None,
         )
     return None
 
@@ -481,6 +560,7 @@ async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
             model_result = await classify_with_schema(
                 _classification_messages(state),
                 CandidateResponseClassification,
+                key_slot=active_turn_key_slot(state),
             )
         except Exception:
             logger.exception(
@@ -505,6 +585,14 @@ async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
             _spoken_word_count(text) >= SELF_INTRO_ELABORATION_WORD_THRESHOLD
         )
         classification["is_substantial"] = is_substantial
+    elif (
+        response_type == "answer"
+        and state.get("current_section_kind") == "behavioural_cultural"
+    ):
+        word_count = _spoken_word_count(text)
+        if word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD:
+            is_substantial = word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD
+            classification["is_substantial"] = is_substantial
 
     clarification_type = classification.get("clarification_type")
     resume_skill_match = clarification_type == "skip_question" and _resume_has_skill(

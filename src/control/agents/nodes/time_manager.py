@@ -13,6 +13,7 @@ from src.control.agents.templates import choose_template
 
 SECTION_TRANSITION_THRESHOLD_SECS = 10
 SECTION_BARGE_IN_GRACE_SECS = 30
+FORCE_BEHAVIOURAL_REMAINING_SECS = 20
 
 
 def _elapsed_from_event(state: InterviewState) -> int:
@@ -174,6 +175,19 @@ def _next_section(
     return None
 
 
+def _behavioural_rescue_section(
+    state: InterviewState,
+) -> tuple[int, dict[str, Any]] | None:
+    """Return behavioural section when it is still ahead of current index."""
+
+    sections = list(state.get("runtime_sections") or [])
+    current = int(state.get("current_section_index") or 0)
+    for index, section in enumerate(sections):
+        if section.get("section_kind") == "behavioural_cultural" and index > current:
+            return index, section
+    return None
+
+
 def _section_label(section: dict[str, Any] | None, fallback: str) -> str:
     """
     Generate a human-readable label for a section, preferring the skill name.
@@ -265,6 +279,126 @@ def _transition(
     }
 
 
+def decide_time_action(state: InterviewState) -> dict[str, Any]:
+    """
+    Decide what should follow a (hypothetically) substantial answer, without an LLM.
+
+    This is the deterministic core of ``check_time_after_substantial_answer`` exposed
+    as a pure helper so the merged interviewer-turn node can resolve the target
+    section before asking the model to generate the next question. The decision uses
+    only elapsed time and section budgets, so it is identical whether computed before
+    or after classification.
+
+    Args:
+        state: The current interview state.
+
+    Returns:
+        A decision dictionary with the action ("continue", "transition", or
+        "close"), the mapped timing updates, the resolved next section, and labels.
+    """
+
+    timing = _timing(state)
+    timing_updates = _timing_updates(timing)
+    next_section = _next_section(state)
+    current_label = _section_label(
+        None,
+        str(state.get("current_section") or "this section"),
+    )
+
+    def _close(reason: str) -> dict[str, Any]:
+        return {
+            "action": "close",
+            "timing_updates": timing_updates,
+            "pending_section_index": None,
+            "suppress_previous_context_for_next_question": False,
+            "transition_reason": None,
+            "closing_reason": reason,
+            "current_label": current_label,
+            "next_label": None,
+            "next_index": None,
+            "next_section": None,
+        }
+
+    def _transition_decision(
+        *,
+        next_index: int,
+        section: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "action": "transition",
+            "timing_updates": timing_updates,
+            "pending_section_index": next_index,
+            "suppress_previous_context_for_next_question": True,
+            "transition_reason": reason,
+            "closing_reason": None,
+            "current_label": current_label,
+            "next_label": _section_label(section, "the next section"),
+            "next_index": next_index,
+            "next_section": section,
+        }
+
+    if timing["remaining_secs"] <= 0:
+        return _close("interview_time_exhausted")
+
+    behavioural_rescue = _behavioural_rescue_section(state)
+    if (
+        behavioural_rescue is not None
+        and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS
+    ):
+        next_index, section = behavioural_rescue
+        return _transition_decision(
+            next_index=next_index,
+            section=section,
+            reason="behavioural_time_rescue",
+        )
+
+    if state.get("current_section_kind") == "self_intro":
+        if next_section is None:
+            return _close("interview_plan_complete")
+        next_index, section = next_section
+        return _transition_decision(
+            next_index=next_index,
+            section=section,
+            reason="self_introduction_complete",
+        )
+
+    if (
+        next_section is None
+        and timing["remaining_secs"] <= SECTION_TRANSITION_THRESHOLD_SECS
+    ):
+        return _close("interview_time_exhausted")
+
+    section_time_low = (
+        timing["section_elapsed_secs"] >= timing["section_budget_secs"]
+        or timing["section_remaining_secs"] <= SECTION_TRANSITION_THRESHOLD_SECS
+    )
+    if section_time_low:
+        if next_section is None:
+            return _close("final_section_complete")
+        next_index, section = next_section
+        return _transition_decision(
+            next_index=next_index,
+            section=section,
+            reason="section_time_exhausted",
+        )
+
+    return {
+        "action": "continue",
+        "timing_updates": timing_updates,
+        "pending_section_index": None,
+        "suppress_previous_context_for_next_question": bool(
+            state.get("suppress_previous_context_for_next_question")
+        ),
+        "transition_reason": None,
+        "closing_reason": None,
+        "current_label": current_label,
+        "next_label": current_label,
+        "next_index": None,
+        "next_section": None,
+    }
+
+
 async def check_time_after_substantial_answer(
     state: InterviewState,
 ) -> dict[str, Any]:
@@ -289,6 +423,22 @@ async def check_time_after_substantial_answer(
 
     if timing["remaining_secs"] <= 0:
         return _closing(timing, reason="interview_time_exhausted")
+
+    behavioural_rescue = _behavioural_rescue_section(state)
+    if (
+        behavioural_rescue is not None
+        and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS
+    ):
+        next_index, section = behavioural_rescue
+        return _transition(
+            state,
+            timing,
+            next_index=next_index,
+            next_section=section,
+            reason="behavioural_time_rescue",
+            template_name="behavioural_forced_transition",
+            barge_in=False,
+        )
 
     next_section = _next_section(state)
     if state.get("current_section_kind") == "self_intro":
@@ -364,6 +514,26 @@ async def force_section_time_barge_in(
             **_closing(timing, reason="interview_time_exhausted"),
             **persistence_updates,
             "barge_in_triggered": True,
+        }
+
+    behavioural_rescue = _behavioural_rescue_section(state)
+    if (
+        behavioural_rescue is not None
+        and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS
+    ):
+        persistence_updates = await persist_candidate_output(state)
+        next_index, section = behavioural_rescue
+        return {
+            **_transition(
+                state,
+                timing,
+                next_index=next_index,
+                next_section=section,
+                reason="behavioural_time_rescue",
+                template_name="behavioural_forced_transition",
+                barge_in=True,
+            ),
+            **persistence_updates,
         }
 
     section_overrun = timing["elapsed_secs"] >= timing["section_barge_deadline_secs"]

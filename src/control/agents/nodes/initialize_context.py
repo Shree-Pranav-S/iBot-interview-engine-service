@@ -5,8 +5,8 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
+from src.clients.core_api_client import get_core_api_client
 from src.control.agents.state import InterviewState
-from src.data.repositories.unit_of_work import InterviewUnitOfWork
 
 
 def _skills(value: Any) -> list[str]:
@@ -129,32 +129,22 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
     """
 
     candidate_assessment_id = str(state["candidate_assessment_id"])
-    async with InterviewUnitOfWork() as unit_of_work:
-        context = await unit_of_work.assessment_context.load_interview_context(
-            candidate_assessment_id,
+    context, session = await get_core_api_client().initialize_interview_context(
+        candidate_assessment_id,
+    )
+    if not context:
+        raise RuntimeError(
+            f"Candidate assessment context not found: {candidate_assessment_id}"
         )
-        if not context:
-            raise RuntimeError(
-                f"Candidate assessment context not found: {candidate_assessment_id}"
-            )
 
-        interview_plan = context.get("interview_plan")
-        if not isinstance(interview_plan, dict):
-            raise RuntimeError(
-                "Interview plan is missing for candidate assessment: "
-                f"{candidate_assessment_id}"
-            )
+    interview_plan = context.get("interview_plan")
+    if not isinstance(interview_plan, dict):
+        raise RuntimeError(
+            "Interview plan is missing for candidate assessment: "
+            f"{candidate_assessment_id}"
+        )
 
-        session = await unit_of_work.interview_sessions.get_or_create_session(
-            candidate_assessment_id,
-        )
-        session_id = str(session["id"])
-        await unit_of_work.interview_sessions.mark_session_in_progress(
-            session_id,
-        )
-        await unit_of_work.assessment_context.mark_candidate_started(
-            candidate_assessment_id,
-        )
+    session_id = str(session["id"])
 
     resume_parsed = context.get("resume_parsed")
     resume = resume_parsed if isinstance(resume_parsed, dict) else {}
@@ -231,6 +221,7 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "candidate_event": None,
         "previous_candidate_response": "",
         "previous_response_duration_ms": None,
+        "llm_key_slot": None,
         "last_classification": None,
         "classification_source": None,
         "last_response_type": None,
@@ -242,6 +233,7 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "skill_evaluation_streaks": {},
         "question_variation_seed": secrets.token_hex(8),
         "probe_deeper": False,
+        "thread_follow_up_used": False,
         "last_skip_resume_skill_match": False,
         "bot_reply_text": "",
         "bot_reply_type": "",
@@ -274,6 +266,7 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "suppress_previous_context_for_next_question": False,
         "transition_reason": None,
         "barge_in_triggered": False,
+        "self_intro_leftover_redistributed": False,
         # This stays false until LiveKit reports that bot audio started.
         "timer_started": False,
         "timer_started_at": None,

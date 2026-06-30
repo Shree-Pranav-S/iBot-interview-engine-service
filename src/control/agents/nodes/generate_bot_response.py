@@ -8,6 +8,10 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from src.control.agents.key_routing import active_turn_key_slot
+from src.control.agents.nodes.classify_response import (
+    is_deterministic_classification_source,
+)
 from src.control.agents.nodes.llm_helpers import rephrase_with_schema
 from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.prompts import QUESTION_REPHRASE_SYSTEM_PROMPT
@@ -53,6 +57,7 @@ def _reply(
         "pending_bot_turn": pending_bot_turn,
         "next_action": next_action,
         "phase_complete": False,
+        "pending_clarification_text": None,
         **updates,
     }
 
@@ -72,6 +77,7 @@ def _continue_with_question(
         "should_advance_question": True,
         "phase_complete": False,
         "silence_stage": "none",
+        "pending_clarification_text": None,
     }
 
 
@@ -187,6 +193,7 @@ async def _rephrase_question(
         result = await rephrase_with_schema(
             messages,
             QuestionRephraseResponse,
+            key_slot=active_turn_key_slot(state),
         )
         rewritten = " ".join(result.question_text.split())
         similarity = SequenceMatcher(
@@ -295,6 +302,10 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
                 ),
                 silence_stage="none",
             )
+        if is_deterministic_classification_source(
+            str(state.get("classification_source") or "")
+        ):
+            return _continue_with_question("", "question_transition")
         return _continue_with_question(
             choose_template("substantial_acknowledgement"),
             "question_transition",
@@ -314,7 +325,11 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
             silence_stage="none",
         )
     if clarification_type == "rephrase_question":
-        rephrased_question = await _rephrase_question(state, question)
+        # The merged interviewer-turn call may have already produced the rephrase in
+        # the same round trip; only call the rephrase model when it did not.
+        rephrased_question = str(
+            state.get("pending_clarification_text") or ""
+        ).strip() or await _rephrase_question(state, question)
         return _reply(
             state,
             choose_template(
@@ -368,7 +383,10 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
             "skip_attempts_for_current_question": attempts,
         }
     if clarification_type == "question_doubt":
-        generated = str(classification.get("question_doubt_response") or "").strip()
+        generated = (
+            str(state.get("pending_clarification_text") or "").strip()
+            or str(classification.get("question_doubt_response") or "").strip()
+        )
         text = generated or choose_template(
             "question_doubt_fallback",
             question=question,

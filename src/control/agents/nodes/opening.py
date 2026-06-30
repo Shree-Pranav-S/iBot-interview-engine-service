@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.control.agents.nodes.question_strategy import (
+    format_resume_skills_phrase,
+    opening_resume_skills,
+)
 from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
@@ -25,11 +29,20 @@ def deliver_opening(state: InterviewState) -> dict[str, Any]:
         State updates containing the opening bot turn and the next routing action.
     """
 
-    text = choose_template(
-        "opening",
-        candidate_name=state.get("candidate_name") or "Candidate",
-        company_name=state.get("company_name") or "the company",
-    )
+    resume_skills = opening_resume_skills(state)
+    if resume_skills:
+        text = choose_template(
+            "opening_resume_aware",
+            candidate_name=state.get("candidate_name") or "Candidate",
+            company_name=state.get("company_name") or "the company",
+            resume_skills=format_resume_skills_phrase(resume_skills),
+        )
+    else:
+        text = choose_template(
+            "opening",
+            candidate_name=state.get("candidate_name") or "Candidate",
+            company_name=state.get("company_name") or "the company",
+        )
     question_text = str(state["current_question_text"])
     pending_bot_turn = build_bot_turn(
         state,
