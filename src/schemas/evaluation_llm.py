@@ -1,4 +1,4 @@
-"""Strict contracts for one-shot holistic interview evaluation."""
+"""Strict contracts for structured holistic interview evaluation."""
 
 from __future__ import annotations
 
@@ -15,6 +15,14 @@ from pydantic import (
 
 HiringRecommendation = Literal["hire", "consider", "no hire"]
 ViolationSeverity = Literal["low", "medium", "high", "critical"]
+RelevanceClass = Literal[
+    "direct_match",
+    "close_equivalent",
+    "transferable_similar",
+    "adjacent_but_not_equivalent",
+    "unrelated",
+    "not_applicable",
+]
 
 
 class EvaluationModel(BaseModel):
@@ -61,8 +69,28 @@ class EvaluationCandidateContext(EvaluationModel):
     total_elapsed_secs: int
 
 
+class QuestionAnswerPair(EvaluationModel):
+    """One interviewer question and every candidate response attached to it."""
+
+    question_id: str = Field(min_length=1, max_length=180)
+    section: str = Field(min_length=1, max_length=180)
+    skill: str | None = Field(default=None, max_length=180)
+    difficulty: str = Field(default="unknown", max_length=80)
+    question_text: str = Field(min_length=1, max_length=5000)
+    bot_turn_id: str | None = Field(default=None, max_length=180)
+    answer_turn_ids: list[str] = Field(default_factory=list, max_length=24)
+    answers: list[str] = Field(default_factory=list, max_length=24)
+    response_types: list[str] = Field(default_factory=list, max_length=24)
+    live_evaluations: list[dict[str, Any]] = Field(
+        default_factory=list,
+        max_length=24,
+    )
+    expected_signals: list[str] = Field(default_factory=list, max_length=32)
+    answered: bool
+
+
 class EvaluationInput(EvaluationModel):
-    """Complete immutable context sent to the evaluator in one request."""
+    """Complete immutable context used to evaluate an interview."""
 
     evaluation_schema_version: str
     transcript_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -70,7 +98,32 @@ class EvaluationInput(EvaluationModel):
     jd_analysis: dict[str, Any]
     interview_plan: dict[str, Any]
     transcript: list[dict[str, Any]] = Field(min_length=1)
+    qa_pairs: list[QuestionAnswerPair] = Field(min_length=1)
     violations: list[dict[str, Any]]
+
+
+class ExtractedQuestionFact(EvaluationModel):
+    """Compact evidence extracted from a Q&A pair before long-form scoring."""
+
+    question_id: str = Field(min_length=1, max_length=180)
+    section: str = Field(min_length=1, max_length=180)
+    skill: str | None = Field(default=None, max_length=180)
+    difficulty: str = Field(default="unknown", max_length=80)
+    question_text: str = Field(min_length=1, max_length=5000)
+    answered: bool
+    answer_summary: str = Field(min_length=1, max_length=2400)
+    response_types: list[str] = Field(default_factory=list, max_length=24)
+    relevance_class: RelevanceClass
+    demonstrated_signals: list[str] = Field(default_factory=list, max_length=20)
+    missing_or_incorrect: list[str] = Field(default_factory=list, max_length=20)
+    evidence: list[str] = Field(min_length=1, max_length=20)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class QuestionFactExtractionOutput(EvaluationModel):
+    """First-stage output for long interviews."""
+
+    question_facts: list[ExtractedQuestionFact] = Field(min_length=1)
 
 
 class SkillScoreOutput(EvaluationModel):
@@ -118,6 +171,22 @@ class ViolationSummaryOutput(EvaluationModel):
         return self
 
 
+class QuestionEvaluationOutput(EvaluationModel):
+    """Structured score and evidence for one interview question."""
+
+    question_id: str = Field(min_length=1, max_length=180)
+    section: str = Field(min_length=1, max_length=180)
+    skill: str | None = Field(default=None, max_length=180)
+    difficulty: str = Field(default="unknown", max_length=80)
+    question_text: str = Field(min_length=1, max_length=5000)
+    answered: bool
+    answer_summary: str = Field(min_length=1, max_length=2400)
+    score: float = Field(ge=0.0, le=10.0)
+    relevance_class: RelevanceClass
+    evidence: list[str] = Field(min_length=1, max_length=20)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class HolisticEvaluationLLMOutput(EvaluationModel):
     """The only JSON object accepted from the holistic evaluator."""
 
@@ -132,6 +201,7 @@ class HolisticEvaluationLLMOutput(EvaluationModel):
     skill_summary: dict[str, str] = Field(min_length=1)
     skill_evidence: dict[str, list[str]] = Field(min_length=1)
     overall_technical_skill_score: float = Field(ge=0.0, le=10.0)
+    question_evaluations: list[QuestionEvaluationOutput] = Field(min_length=1)
 
     behavioural_cultural_score: float = Field(ge=0.0, le=10.0)
     behavioural_cultural_summary: str = Field(
@@ -208,6 +278,7 @@ class FinalEvaluationRecord(EvaluationModel):
     overall_technical_skill_score: float
     skill_summary: dict[str, str]
     skill_evidence: dict[str, list[str]]
+    question_evaluations: list[dict[str, Any]]
 
     behavioural_cultural_score: float
     behavioural_cultural_summary: str

@@ -1,4 +1,4 @@
-"""Build the complete immutable JSON context for one-shot evaluation."""
+"""Build immutable transcript and Q&A context for holistic evaluation."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ from src.core.services.evaluation_errors import PermanentEvaluationError
 from src.schemas.evaluation_llm import (
     EvaluationCandidateContext,
     EvaluationInput,
+    QuestionAnswerPair,
 )
 
-EVALUATION_SCHEMA_VERSION = "holistic-evaluation-v1"
+EVALUATION_SCHEMA_VERSION = "holistic-evaluation-v2"
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,173 @@ def _question_counts(transcript: list[dict[str, Any]]) -> dict[str, int]:
     return {key: len(values) for key, values in question_ids.items()}
 
 
+def _string_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in _json_list(value) if str(item).strip()]
+
+
+def _turn_value(turn: dict[str, Any], key: str) -> Any:
+    value = turn.get(key)
+    if value not in (None, ""):
+        return value
+    return _json_object(turn.get("metadata")).get(key)
+
+
+def _question_id(turn: dict[str, Any]) -> str:
+    return str(_turn_value(turn, "question_id") or "").strip()
+
+
+def _response_type(turn: dict[str, Any]) -> str:
+    metadata = _json_object(turn.get("metadata"))
+    classification = _json_object(metadata.get("classification"))
+    return str(
+        turn.get("response_type")
+        or metadata.get("response_type")
+        or classification.get("response_type")
+        or ""
+    ).strip()
+
+
+def _live_evaluation(turn: dict[str, Any]) -> dict[str, Any]:
+    metadata = _json_object(turn.get("metadata"))
+    value = turn.get("live_evaluation") or metadata.get("live_evaluation")
+    return _json_object(value)
+
+
+def _is_scored_question(turn: dict[str, Any]) -> bool:
+    if str(turn.get("speaker") or "").casefold() != "bot":
+        return False
+    metadata = _json_object(turn.get("metadata"))
+    question_type = str(
+        turn.get("question_type")
+        or metadata.get("question_type")
+        or metadata.get("message_type")
+        or ""
+    ).casefold()
+    if question_type in {"new_question", "question", "opening"}:
+        return True
+    if question_type:
+        return False
+    # Legacy transcripts only marked a bot turn with the active skill/section.
+    return bool(
+        turn.get("current_skill")
+        or turn.get("skill")
+        or turn.get("current_section")
+        or turn.get("section")
+    )
+
+
+def _meaningful_answer(text: str, response_type: str) -> bool:
+    normalized_type = response_type.casefold()
+    if normalized_type in {"silence", "irrelevant", "refusal"}:
+        return False
+    if normalized_type == "clarification":
+        return False
+    return bool(text.strip())
+
+
+def build_question_answer_pairs(
+    transcript: list[dict[str, Any]],
+) -> list[QuestionAnswerPair]:
+    """Pair every scored interviewer question with its candidate responses."""
+
+    pair_data: list[dict[str, Any]] = []
+    pair_indexes: dict[str, int] = {}
+    active_index: int | None = None
+
+    for turn_index, turn in enumerate(transcript):
+        speaker = str(turn.get("speaker") or "").casefold()
+        if speaker == "bot" and _is_scored_question(turn):
+            metadata = _json_object(turn.get("metadata"))
+            raw_id = _question_id(turn)
+            question_id = raw_id or f"legacy-question-{turn_index + 1}"
+            # Duplicate identifiers should represent the same question (for
+            # example, a rephrase). A genuinely new question without a stable
+            # id gets the deterministic legacy id above.
+            existing_index = pair_indexes.get(question_id)
+            if existing_index is not None:
+                active_index = existing_index
+                continue
+
+            section = str(
+                turn.get("current_section")
+                or turn.get("section")
+                or metadata.get("current_section")
+                or metadata.get("section")
+                or "unknown"
+            ).strip()
+            skill_value = (
+                turn.get("current_skill")
+                or turn.get("skill")
+                or metadata.get("current_skill")
+                or metadata.get("skill")
+            )
+            skill = str(skill_value).strip() if skill_value else None
+            difficulty = str(
+                turn.get("question_difficulty")
+                or turn.get("difficulty")
+                or metadata.get("question_difficulty")
+                or metadata.get("difficulty")
+                or "unknown"
+            ).strip()
+            question_text = str(
+                turn.get("question_text")
+                or metadata.get("question_text")
+                or turn.get("text")
+                or ""
+            ).strip()
+            if not question_text:
+                continue
+            pair_data.append(
+                {
+                    "question_id": question_id,
+                    "section": section or "unknown",
+                    "skill": skill,
+                    "difficulty": difficulty or "unknown",
+                    "question_text": question_text,
+                    "bot_turn_id": (
+                        str(turn["turn_id"]) if turn.get("turn_id") else None
+                    ),
+                    "answer_turn_ids": [],
+                    "answers": [],
+                    "response_types": [],
+                    "live_evaluations": [],
+                    "expected_signals": _string_list(
+                        turn.get("expected_signals") or metadata.get("expected_signals")
+                    ),
+                    "answered": False,
+                }
+            )
+            active_index = len(pair_data) - 1
+            pair_indexes[question_id] = active_index
+            continue
+
+        if speaker != "candidate":
+            continue
+        candidate_question_id = _question_id(turn)
+        target_index = (
+            pair_indexes.get(candidate_question_id, active_index)
+            if candidate_question_id
+            else active_index
+        )
+        if target_index is None:
+            continue
+        pair = pair_data[target_index]
+        answer_text = str(turn.get("text") or "").strip()
+        response_type = _response_type(turn) or "unknown"
+        if answer_text:
+            pair["answers"].append(answer_text)
+        pair["response_types"].append(response_type)
+        if turn.get("turn_id"):
+            pair["answer_turn_ids"].append(str(turn["turn_id"]))
+        live_evaluation = _live_evaluation(turn)
+        if live_evaluation:
+            pair["live_evaluations"].append(live_evaluation)
+        if _meaningful_answer(answer_text, response_type):
+            pair["answered"] = True
+
+    return [QuestionAnswerPair.model_validate(item) for item in pair_data]
+
+
 def _technical_skill_specs(
     *,
     jd_analysis: dict[str, Any],
@@ -250,6 +418,44 @@ def _technical_skill_specs(
     return tuple(specs)
 
 
+def _canonicalize_question_skills(
+    qa_pairs: list[QuestionAnswerPair],
+    technical_skills: tuple[TechnicalSkillSpec, ...],
+) -> tuple[list[QuestionAnswerPair], tuple[TechnicalSkillSpec, ...]]:
+    specs_by_key = {_skill_key(item.name): item for item in technical_skills}
+    counts = {item.name: 0 for item in technical_skills}
+    canonical_pairs: list[QuestionAnswerPair] = []
+
+    for pair in qa_pairs:
+        value = pair.model_dump(mode="json")
+        pair_key = _skill_key(pair.skill) if pair.skill else ""
+        matched = specs_by_key.get(pair_key)
+        if matched is None and pair_key:
+            for spec_key, spec in specs_by_key.items():
+                if min(len(pair_key), len(spec_key)) >= 3 and (
+                    pair_key in spec_key or spec_key in pair_key
+                ):
+                    matched = spec
+                    break
+        if matched is not None:
+            value["skill"] = matched.name
+            if not value["expected_signals"]:
+                value["expected_signals"] = list(matched.expected_signals)
+            counts[matched.name] += 1
+        canonical_pairs.append(QuestionAnswerPair.model_validate(value))
+
+    counted_specs = tuple(
+        TechnicalSkillSpec(
+            name=item.name,
+            priority_score=item.priority_score,
+            expected_signals=item.expected_signals,
+            questions_asked=counts[item.name],
+        )
+        for item in technical_skills
+    )
+    return canonical_pairs, counted_specs
+
+
 def _transcript_hash(
     *,
     transcript: list[dict[str, Any]],
@@ -289,7 +495,7 @@ def build_evaluation_context(
 ) -> EvaluationContextBundle:
     """
     Validate repository data, extract skills, calculate properties, and build
-    the complete immutable JSON context bundle for one-shot evaluation.
+    the complete immutable JSON context bundle for evaluation.
 
     Args:
         source: The raw source data dictionary retrieved from the database.
@@ -310,6 +516,7 @@ def build_evaluation_context(
         raise PermanentEvaluationError(
             "Cannot evaluate an interview with an empty transcript"
         )
+    qa_pairs = build_question_answer_pairs(transcript)
     violations = [
         dict(item)
         for item in _json_list(source.get("violations"))
@@ -325,6 +532,14 @@ def build_evaluation_context(
         interview_plan=interview_plan,
         transcript=transcript,
     )
+    qa_pairs, technical_skills = _canonicalize_question_skills(
+        qa_pairs,
+        technical_skills,
+    )
+    if not qa_pairs:
+        raise PermanentEvaluationError(
+            "Cannot evaluate an interview without any scored questions"
+        )
     inferred_difficulty = str(
         interview_plan.get("inferred_difficulty")
         or jd_analysis.get("inferred_difficulty")
@@ -363,6 +578,7 @@ def build_evaluation_context(
         jd_analysis=jd_analysis,
         interview_plan=interview_plan,
         transcript=transcript,
+        qa_pairs=qa_pairs,
         violations=violations,
     )
     return EvaluationContextBundle(

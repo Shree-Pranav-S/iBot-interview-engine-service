@@ -1,4 +1,4 @@
-"""NVIDIA NIM client for one-shot holistic interview evaluation."""
+"""NVIDIA NIM client for direct or two-stage holistic evaluation."""
 
 from __future__ import annotations
 
@@ -32,8 +32,13 @@ from src.core.services.evaluation_errors import (
 )
 from src.core.services.evaluation_prompt import (
     HOLISTIC_EVALUATION_SYSTEM_PROMPT,
+    QUESTION_FACT_EXTRACTION_SYSTEM_PROMPT,
 )
-from src.schemas.evaluation_llm import HolisticEvaluationLLMOutput
+from src.schemas.evaluation_llm import (
+    ExtractedQuestionFact,
+    HolisticEvaluationLLMOutput,
+    QuestionFactExtractionOutput,
+)
 
 logger = logging.getLogger(__name__)
 _client: AsyncOpenAI | None = None
@@ -159,6 +164,15 @@ def _semantic_errors(
         bundle.evaluation_input.violations
     ):
         errors.append("validated_violation_count cannot exceed supplied violations")
+    expected_question_ids = [
+        item.question_id for item in bundle.evaluation_input.qa_pairs
+    ]
+    actual_question_ids = [item.question_id for item in output.question_evaluations]
+    if actual_question_ids != expected_question_ids:
+        errors.append(
+            "question_evaluations must contain each authoritative question_id "
+            f"exactly once and in input order: {expected_question_ids}"
+        )
     return errors
 
 
@@ -279,6 +293,32 @@ def _normalize_structural_output(
     if evidence_map or "skill_evidence" in normalized:
         normalized["skill_evidence"] = evidence_map
 
+    authoritative_questions = {
+        item.question_id: item for item in bundle.evaluation_input.qa_pairs
+    }
+    question_evaluations = normalized.get("question_evaluations")
+    if isinstance(question_evaluations, list):
+        for index, value in enumerate(question_evaluations):
+            if not isinstance(value, dict):
+                continue
+            question = authoritative_questions.get(str(value.get("question_id") or ""))
+            if question is None:
+                continue
+            for field in (
+                "question_id",
+                "section",
+                "skill",
+                "difficulty",
+                "question_text",
+                "answered",
+            ):
+                authoritative_value = getattr(question, field)
+                if value.get(field) != authoritative_value:
+                    adjustments.append(
+                        f"question_evaluations[{index}].{field}=authoritative"
+                    )
+                value[field] = authoritative_value
+
     violation_summary = normalized.get("violation_summary")
     if isinstance(violation_summary, dict):
         violation_summary = dict(violation_summary)
@@ -343,6 +383,7 @@ def _validate_output(
 
 def _base_messages(
     bundle: EvaluationContextBundle,
+    question_facts: QuestionFactExtractionOutput | None = None,
 ) -> list[ChatCompletionMessageParam]:
     """
     Construct the base chat messages to prompt the LLM for evaluation.
@@ -353,8 +394,20 @@ def _base_messages(
     Returns:
         A list of chat completion messages containing the system instructions and user input.
     """
+    evaluation_input = bundle.evaluation_input.model_dump(mode="json")
+    # Raw turns remain persisted and hashed, but the scorer receives only the
+    # deterministic Q&A representation (or compact first-stage facts).
+    evaluation_input.pop("transcript", None)
+    if question_facts is not None:
+        evaluation_input.pop("qa_pairs", None)
+        evaluation_input["evidence_mode"] = "two_stage_question_facts"
+        evaluation_input["question_facts"] = question_facts.model_dump(mode="json")[
+            "question_facts"
+        ]
+    else:
+        evaluation_input["evidence_mode"] = "direct_qa_pairs"
     input_json = json.dumps(
-        bundle.evaluation_input.model_dump(mode="json"),
+        evaluation_input,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -379,6 +432,137 @@ def _base_messages(
             ),
         },
     ]
+
+
+def _requires_two_stage(bundle: EvaluationContextBundle) -> bool:
+    qa_payload = json.dumps(
+        [item.model_dump(mode="json") for item in bundle.evaluation_input.qa_pairs],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        len(bundle.evaluation_input.qa_pairs)
+        >= settings.NVIDIA_NIM_TWO_STAGE_QA_THRESHOLD
+        or len(qa_payload) >= settings.NVIDIA_NIM_TWO_STAGE_INPUT_CHARS
+    )
+
+
+def _normalize_question_facts(
+    output: QuestionFactExtractionOutput,
+    bundle: EvaluationContextBundle,
+) -> QuestionFactExtractionOutput:
+    expected = bundle.evaluation_input.qa_pairs
+    actual_ids = [item.question_id for item in output.question_facts]
+    expected_ids = [item.question_id for item in expected]
+    if actual_ids != expected_ids:
+        raise EvaluationSchemaError(
+            "question_facts must contain each authoritative question_id exactly "
+            f"once and in input order: {expected_ids}"
+        )
+
+    normalized: list[ExtractedQuestionFact] = []
+    for fact, pair in zip(output.question_facts, expected, strict=True):
+        value = fact.model_dump(mode="json")
+        for field in (
+            "question_id",
+            "section",
+            "skill",
+            "difficulty",
+            "question_text",
+            "answered",
+            "response_types",
+        ):
+            value[field] = getattr(pair, field)
+        normalized.append(ExtractedQuestionFact.model_validate(value))
+    return QuestionFactExtractionOutput(question_facts=normalized)
+
+
+def _extraction_messages(
+    bundle: EvaluationContextBundle,
+) -> list[ChatCompletionMessageParam]:
+    input_json = json.dumps(
+        {
+            "candidate": bundle.evaluation_input.candidate.model_dump(mode="json"),
+            "qa_pairs": [
+                item.model_dump(mode="json")
+                for item in bundle.evaluation_input.qa_pairs
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    schema_json = json.dumps(
+        QuestionFactExtractionOutput.model_json_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return [
+        {"role": "system", "content": QUESTION_FACT_EXTRACTION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"EXTRACTION_INPUT_JSON:\n{input_json}\n\n"
+                f"REQUIRED_OUTPUT_SCHEMA:\n{schema_json}\n\n"
+                "Extract the question facts now. Return strict JSON only."
+            ),
+        },
+    ]
+
+
+def _validate_question_facts(
+    raw: str,
+    bundle: EvaluationContextBundle,
+) -> tuple[QuestionFactExtractionOutput, dict[str, Any]]:
+    parsed = _extract_json_object(raw)
+    try:
+        output = QuestionFactExtractionOutput.model_validate(parsed)
+    except ValidationError as exc:
+        raise EvaluationSchemaError(str(exc)) from exc
+    return _normalize_question_facts(output, bundle), parsed
+
+
+async def _extract_question_facts(
+    bundle: EvaluationContextBundle,
+) -> tuple[QuestionFactExtractionOutput, dict[str, Any]]:
+    raw = await _complete(_extraction_messages(bundle), enable_reasoning=False)
+    try:
+        return _validate_question_facts(raw, bundle)
+    except EvaluationSchemaError as exc:
+        schema_json = json.dumps(
+            QuestionFactExtractionOutput.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        expected_ids = [item.question_id for item in bundle.evaluation_input.qa_pairs]
+        repair_messages: list[ChatCompletionMessageParam] = [
+            {
+                "role": "system",
+                "content": (
+                    "Repair an interview fact-extraction JSON object. Return one "
+                    "strict JSON object only. Preserve evidence; fix only schema, "
+                    "question coverage, identifiers, and ordering."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"INVALID_JSON:\n{raw}\n\n"
+                    f"VALIDATION_ERRORS:\n{exc}\n\n"
+                    f"AUTHORITATIVE_QUESTION_IDS:\n"
+                    f"{json.dumps(expected_ids, separators=(',', ':'))}\n\n"
+                    f"REQUIRED_OUTPUT_SCHEMA:\n{schema_json}\n\n"
+                    "Repair the JSON now."
+                ),
+            },
+        ]
+        repaired_raw = await _complete(repair_messages, enable_reasoning=False)
+        try:
+            return _validate_question_facts(repaired_raw, bundle)
+        except EvaluationSchemaError as repaired_exc:
+            raise EvaluationSchemaError(
+                "NVIDIA question-fact extraction remained invalid after repair: "
+                f"{repaired_exc}"
+            ) from repaired_exc
 
 
 def _retry_after_seconds(exc: APIStatusError) -> int | None:
@@ -633,7 +817,21 @@ async def run_nvidia_holistic_evaluation(
         },
     )
 
-    messages = _base_messages(bundle)
+    question_facts: QuestionFactExtractionOutput | None = None
+    extraction_raw: dict[str, Any] | None = None
+    pipeline = "direct_qa"
+    if _requires_two_stage(bundle):
+        pipeline = "extract_then_score"
+        logger.info(
+            "Long interview detected; extracting question facts before scoring",
+            extra={
+                "candidate_assessment_id": candidate_id,
+                "question_count": len(bundle.evaluation_input.qa_pairs),
+            },
+        )
+        question_facts, extraction_raw = await _extract_question_facts(bundle)
+
+    messages = _base_messages(bundle, question_facts)
     logger.info(
         "NVIDIA evaluation LLM attempt 1/1",
         extra={"candidate_assessment_id": candidate_id},
@@ -645,7 +843,14 @@ async def run_nvidia_holistic_evaluation(
             "NVIDIA evaluation validated successfully",
             extra={"candidate_assessment_id": candidate_id},
         )
-        return result
+        return NvidiaEvaluationResult(
+            output=result.output,
+            raw_output={
+                "pipeline": pipeline,
+                "question_fact_extraction": extraction_raw,
+                "evaluation": result.raw_output,
+            },
+        )
     except EvaluationSchemaError as exc:
         last_error = str(exc)
         logger.warning(
@@ -661,6 +866,9 @@ async def run_nvidia_holistic_evaluation(
         }
         for spec in bundle.technical_skills
     }
+    expected_question_ids = [
+        item.question_id for item in bundle.evaluation_input.qa_pairs
+    ]
     schema_json = json.dumps(
         HolisticEvaluationLLMOutput.model_json_schema(),
         ensure_ascii=False,
@@ -684,6 +892,8 @@ async def run_nvidia_holistic_evaluation(
                 f"VALIDATION_ERRORS:\n{last_error}\n\n"
                 "AUTHORITATIVE_SKILL_METADATA:\n"
                 f"{json.dumps(expected_skills, separators=(',', ':'))}\n\n"
+                "AUTHORITATIVE_QUESTION_IDS:\n"
+                f"{json.dumps(expected_question_ids, separators=(',', ':'))}\n\n"
                 f"REQUIRED_OUTPUT_SCHEMA:\n{schema_json}\n\n"
                 "Repair the JSON structure only."
             ),
@@ -694,7 +904,16 @@ async def run_nvidia_holistic_evaluation(
         enable_reasoning=False,
     )
     try:
-        return _validate_output(repaired_raw, bundle)
+        repaired = _validate_output(repaired_raw, bundle)
+        return NvidiaEvaluationResult(
+            output=repaired.output,
+            raw_output={
+                "pipeline": pipeline,
+                "question_fact_extraction": extraction_raw,
+                "evaluation": repaired.raw_output,
+                "evaluation_repaired": True,
+            },
+        )
     except EvaluationSchemaError as exc:
         raise EvaluationSchemaError(
             f"NVIDIA output remained invalid after retry and repair: {exc}"

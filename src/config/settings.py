@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     GROQ_KEY_RATE_LIMIT_COOLDOWN_SECS: float = Field(default=60.0)
     GROQ_KEY_TRANSIENT_COOLDOWN_SECS: float = Field(default=5.0)
 
-    # NVIDIA NIM one-shot holistic evaluation.
+    # NVIDIA NIM structured holistic evaluation.
     NVIDIA_NIM_API_KEY: str = Field(default="")
     FALLBACK_NVIDIA_NIM_API_KEY: str = Field(default="")
     NVIDIA_NIM_BASE_URL: str = Field(
@@ -83,12 +83,14 @@ class Settings(BaseSettings):
     NVIDIA_NIM_MODEL: str = Field(
         default="nvidia/nemotron-3-ultra-550b-a55b",
     )
-    NVIDIA_NIM_TEMPERATURE: float = Field(default=1.0)
+    NVIDIA_NIM_TEMPERATURE: float = Field(default=0.2)
     NVIDIA_NIM_TOP_P: float = Field(default=0.95)
     NVIDIA_NIM_MAX_TOKENS: int = Field(default=16384)
     NVIDIA_NIM_REASONING_BUDGET: int = Field(default=16384)
     NVIDIA_NIM_TIMEOUT_SECS: float = Field(default=600.0)
     NVIDIA_NIM_STREAM: bool = Field(default=True)
+    NVIDIA_NIM_TWO_STAGE_QA_THRESHOLD: int = Field(default=12, ge=1)
+    NVIDIA_NIM_TWO_STAGE_INPUT_CHARS: int = Field(default=18000, ge=1000)
 
     # LiveKit real-time communication.
     LIVEKIT_URL: str = Field(default="")

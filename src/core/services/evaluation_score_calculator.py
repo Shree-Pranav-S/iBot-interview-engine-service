@@ -20,8 +20,22 @@ TECHNICAL_WEIGHT = 0.75
 BEHAVIOURAL_CULTURAL_WEIGHT = 0.15
 INTRO_WEIGHT = 0.05
 COMMUNICATION_WEIGHT = 0.05
-PRIORITY_EXPONENT = 1.25
+PRIORITY_EXPONENT = 1.35
 HIGH_PRIORITY_THRESHOLD = 7.0
+
+QUESTION_DIFFICULTY_WEIGHTS: dict[str, float] = {
+    "easy": 1.0,
+    "medium": 1.1,
+    "hard": 1.15,
+}
+RELEVANCE_SCORE_CAPS: dict[str, float] = {
+    "direct_match": 10.0,
+    "close_equivalent": 8.0,
+    "transferable_similar": 6.5,
+    "adjacent_but_not_equivalent": 4.5,
+    "unrelated": 2.0,
+    "not_applicable": 10.0,
+}
 
 PENALTY_BY_SEVERITY: dict[str, float] = {
     "low": 0.15,
@@ -83,6 +97,62 @@ def _technical_score(
         weighted_total += score * weight
         weight_total += weight
     return weighted_total / weight_total if weight_total else 0.0
+
+
+def _authoritative_question_evaluations(
+    model_result: NvidiaEvaluationResult,
+) -> list[dict[str, Any]]:
+    evaluations: list[dict[str, Any]] = []
+    for item in model_result.output.question_evaluations:
+        value = item.model_dump(mode="json")
+        relevance_cap = RELEVANCE_SCORE_CAPS[item.relevance_class]
+        value["score"] = _round_score(min(item.score, relevance_cap))
+        value["confidence"] = round(
+            min(1.0, max(0.0, item.confidence)),
+            3,
+        )
+        evaluations.append(value)
+    return evaluations
+
+
+def _skill_question_aggregate(
+    *,
+    skill: str,
+    question_evaluations: list[dict[str, Any]],
+) -> tuple[float, float] | None:
+    matching = [
+        item
+        for item in question_evaluations
+        if str(item.get("skill") or "").casefold() == skill.casefold()
+    ]
+    if not matching:
+        return None
+
+    weighted_score = 0.0
+    weighted_confidence = 0.0
+    total_weight = 0.0
+    for item in matching:
+        difficulty = str(item.get("difficulty") or "unknown").casefold()
+        weight = QUESTION_DIFFICULTY_WEIGHTS.get(difficulty, 1.0)
+        weighted_score += _clamp_score(float(item.get("score") or 0.0)) * weight
+        weighted_confidence += (
+            min(
+                1.0,
+                max(0.0, float(item.get("confidence") or 0.0)),
+            )
+            * weight
+        )
+        total_weight += weight
+    if total_weight <= 0:
+        return 0.0, 0.0
+    return weighted_score / total_weight, weighted_confidence / total_weight
+
+
+def _has_behavioural_questions(bundle: EvaluationContextBundle) -> bool:
+    return any(
+        "behav" in item.section.casefold() or "cultur" in item.section.casefold()
+        for item in bundle.evaluation_input.qa_pairs
+    )
 
 
 def _violation_penalty(severity_counts: dict[str, int]) -> float:
@@ -196,16 +266,26 @@ def calculate_final_evaluation(
     """
 
     output = model_result.output
+    question_evaluations = _authoritative_question_evaluations(model_result)
     authoritative_specs = {item.name: item for item in bundle.technical_skills}
     skill_scores: dict[str, dict[str, Any]] = {}
     for skill, model_details in output.skill_scores.items():
         spec = authoritative_specs[skill]
+        question_aggregate = _skill_question_aggregate(
+            skill=skill,
+            question_evaluations=question_evaluations,
+        )
+        if question_aggregate is None:
+            aggregate_score = model_details.score
+            aggregate_confidence = model_details.confidence
+        else:
+            aggregate_score, aggregate_confidence = question_aggregate
         skill_scores[skill] = {
-            "score": _round_score(model_details.score),
+            "score": _round_score(aggregate_score),
             "priority_score": round(spec.priority_score, 2),
             "questions_evaluated": spec.questions_asked,
             "confidence": round(
-                min(1.0, max(0.0, model_details.confidence)),
+                min(1.0, max(0.0, aggregate_confidence)),
                 3,
             ),
         }
@@ -213,6 +293,16 @@ def calculate_final_evaluation(
     technical_score = _technical_score(skill_scores)
     intro_score = _clamp_score(output.intro_section_score)
     behavioural_score = _clamp_score(output.behavioural_cultural_score)
+    severity_counts = output.violation_summary.severity_counts.model_dump()
+    # If the behavioural section was never reached, lack of evidence is not
+    # negative candidate evidence. Preserve a neutral floor unless validated
+    # serious conduct elsewhere supports a lower score.
+    if (
+        not _has_behavioural_questions(bundle)
+        and not severity_counts["high"]
+        and not severity_counts["critical"]
+    ):
+        behavioural_score = max(5.0, behavioural_score)
     communication_score = _clamp_score(output.communication_score)
     raw_overall_score = (
         technical_score * TECHNICAL_WEIGHT
@@ -221,7 +311,6 @@ def calculate_final_evaluation(
         + communication_score * COMMUNICATION_WEIGHT
     )
 
-    severity_counts = output.violation_summary.severity_counts.model_dump()
     violation_penalty = _violation_penalty(severity_counts)
     final_score = max(0.0, raw_overall_score - violation_penalty)
     final_recommendation, gates = _recommendation(
@@ -265,6 +354,7 @@ def calculate_final_evaluation(
         overall_technical_skill_score=_round_score(technical_score),
         skill_summary=output.skill_summary,
         skill_evidence=output.skill_evidence,
+        question_evaluations=question_evaluations,
         behavioural_cultural_score=_round_score(behavioural_score),
         behavioural_cultural_summary=(output.behavioural_cultural_summary),
         behavioural_cultural_evidence=(output.behavioural_cultural_evidence),

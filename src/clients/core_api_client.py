@@ -31,6 +31,27 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 _INTERNAL_HEADER = "interview-engine"
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+_HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+_http_client: httpx.AsyncClient | None = None
+
+
+def _create_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_TIMEOUT, limits=_HTTP_LIMITS)
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = _create_http_client()
+    return _http_client
+
+
+async def close_core_api_http_client() -> None:
+    """Close the shared pooled HTTP client during process shutdown."""
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
 
 
 def _exception_for_status(status_code: int, message: str) -> AppException:
@@ -50,8 +71,16 @@ def _exception_for_status(status_code: int, message: str) -> AppException:
 class CoreApiClient:
     """Async client for core-api /internal/interview routes."""
 
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._base_url = (base_url or settings.CORE_API_URL).rstrip("/")
+        self._http_client = http_client
+
+    def _client(self) -> httpx.AsyncClient:
+        return self._http_client or _get_http_client()
 
     def _headers(self) -> dict[str, str]:
         return {"X-Internal-Service": _INTERNAL_HEADER}
@@ -66,14 +95,13 @@ class CoreApiClient:
     ) -> Any:
         url = f"{self._base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    headers=self._headers(),
-                    json=json,
-                    params=params,
-                )
+            response = await self._client().request(
+                method,
+                url,
+                headers=self._headers(),
+                json=json,
+                params=params,
+            )
         except httpx.RequestError as exc:
             logger.exception("core-api request failed", extra={"url": url})
             raise BadGatewayException(
@@ -318,8 +346,10 @@ class CoreApiClient:
 
     async def health_ping(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-                response = await client.get(f"{self._base_url}/health")
+            response = await self._client().get(
+                f"{self._base_url}/health",
+                timeout=httpx.Timeout(5.0),
+            )
             return response.status_code == 200
         except httpx.RequestError:
             return False

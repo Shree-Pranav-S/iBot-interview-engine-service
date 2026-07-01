@@ -1,4 +1,4 @@
-"""Orchestrate one-shot NVIDIA evaluation and deterministic persistence."""
+"""Orchestrate structured NVIDIA evaluation and deterministic persistence."""
 
 from __future__ import annotations
 
