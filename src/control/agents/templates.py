@@ -250,6 +250,19 @@ ELABORATE_ANSWER = (
     "Please expand your response enough for me to assess it.",
 )
 
+SELF_INTRO_COMPLETION_ACK = (
+    "Thank you for that introduction.",
+    "Thanks for walking me through your background.",
+    "I appreciate the overview of your experience.",
+    "Thank you for sharing your professional background.",
+    "That gives me a helpful picture of your experience.",
+    "I appreciate you taking the time to introduce yourself.",
+    "Thanks for the context on your background and skills.",
+    "That was a clear introduction. Thank you.",
+    "I have a good sense of your background now. Thank you.",
+    "Thanks for outlining your experience so far.",
+)
+
 SELF_INTRO_ELABORATE = (
     "Could you tell me a little more about your professional background and experience?",
     "Please expand on your recent work, core skills, and professional journey.",
@@ -500,6 +513,7 @@ _BANKS = {
     "skip_resume_skill_prefix": SKIP_RESUME_SKILL_PREFIX,
     "irrelevant_redirect": IRRELEVANT_REDIRECT,
     "elaborate_answer": ELABORATE_ANSWER,
+    "self_intro_completion_ack": SELF_INTRO_COMPLETION_ACK,
     "self_intro_elaborate": SELF_INTRO_ELABORATE,
     "substantial_acknowledgement": SUBSTANTIAL_ACKNOWLEDGEMENT,
     "question_doubt_fallback": QUESTION_DOUBT_FALLBACK,

@@ -261,6 +261,10 @@ class LiveKitInterviewBridge:
             return
         if self.state.get("phase_complete"):
             return
+        if self.state.get("is_self_introduction") or (
+            self.state.get("current_section_kind") == "self_intro"
+        ):
+            return
 
         self._cancel_speculative_warm()
 

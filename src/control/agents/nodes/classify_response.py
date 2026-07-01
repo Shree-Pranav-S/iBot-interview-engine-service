@@ -18,9 +18,13 @@ from src.utils.interview_graph import deterministic_violation_id, utc_now_iso
 logger = logging.getLogger(__name__)
 
 REPEAT_PATTERN = re.compile(
-    r"\b(repeat (?:it|that|this question|that question|the question)|"
+    r"\b("
+    r"repeat (?:it|that|this question|that question|the question)|"
+    r"can you repeat (?:it|that|the question|this question)|"
+    r"could you repeat (?:it|that|the question|this question)|"
     r"say (?:it|that) again|hear (?:it|that|this question|the question) again|"
-    r"once more)\b",
+    r"once more"
+    r")\b",
     re.IGNORECASE,
 )
 REPHRASE_PATTERN = re.compile(

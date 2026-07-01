@@ -245,9 +245,15 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
 
     response_type = state.get("last_response_type")
     classification = state.get("last_classification") or {}
+    is_intro = bool(state.get("is_self_introduction"))
     question = (
         state.get("current_question_text")
         or "Could you answer the current interview question?"
+    )
+    intro_repeat_text = (
+        state.get("last_spoken_opening_text")
+        or state.get("last_rephrased_question")
+        or question
     )
 
     if response_type == "silence":
@@ -261,6 +267,15 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
                 silence_stage="awaiting_think_confirmation",
             )
         if stage == "awaiting_think_confirmation":
+            if is_intro:
+                return _reply(
+                    state,
+                    choose_template("self_intro_elaborate"),
+                    "elaboration_request",
+                    question_type="elaboration_request",
+                    self_intro_elaboration_requested=True,
+                    silence_stage="none",
+                )
             return _continue_with_question(
                 choose_template("no_response_move_on"),
                 "silence_ack",
@@ -273,12 +288,30 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
                 question_type="silence_response",
                 silence_stage="nudged",
             )
+        if is_intro:
+            return _reply(
+                state,
+                choose_template("self_intro_elaborate"),
+                "elaboration_request",
+                question_type="elaboration_request",
+                self_intro_elaboration_requested=True,
+                silence_stage="none",
+            )
         return _continue_with_question(
             choose_template("no_response_move_on"),
             "silence_ack",
         )
 
     if response_type == "irrelevant":
+        if is_intro:
+            return _reply(
+                state,
+                choose_template("self_intro_elaborate"),
+                "intro_stay_on_topic",
+                question_type="elaboration_request",
+                self_intro_elaboration_requested=True,
+                silence_stage="none",
+            )
         return _reply(
             state,
             choose_template("irrelevant_redirect"),
@@ -313,7 +346,11 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
 
     clarification_type = str(classification.get("clarification_type") or "")
     if clarification_type == "repeat_question":
-        repeatable_question = state.get("last_rephrased_question") or question
+        repeatable_question = (
+            intro_repeat_text
+            if is_intro
+            else (state.get("last_rephrased_question") or question)
+        )
         return _reply(
             state,
             choose_template(
@@ -373,6 +410,16 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
                 "skip_partial_request",
                 question_type="skip_response",
                 skip_attempts_for_current_question=attempts,
+                silence_stage="none",
+            )
+        if is_intro:
+            return _reply(
+                state,
+                choose_template("self_intro_elaborate"),
+                "skip_intro_stay",
+                question_type="elaboration_request",
+                skip_attempts_for_current_question=attempts,
+                self_intro_elaboration_requested=True,
                 silence_stage="none",
             )
         return {

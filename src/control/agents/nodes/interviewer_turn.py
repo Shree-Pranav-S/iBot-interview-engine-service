@@ -40,6 +40,7 @@ from src.control.agents.nodes.question_strategy import difficulty_plan
 from src.control.agents.nodes.time_manager import decide_time_action
 from src.control.agents.prompts import INTERVIEWER_TURN_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
+from src.control.agents.templates import choose_template
 from src.schemas.prompts import InterviewerTurnResponse
 
 logger = logging.getLogger(__name__)
@@ -462,6 +463,19 @@ def _apply_result(
             "Due to lack of time lets move to the behavioural section."
         )
 
+    intro_transition_preface = None
+    if (
+        decision.get("action") == "transition"
+        and decision.get("transition_reason") == "self_introduction_complete"
+    ):
+        intro_ack = choose_template("self_intro_completion_ack")
+        section_bridge = choose_template(
+            "section_transition",
+            current_section=decision.get("current_label") or "your introduction",
+            next_section=decision.get("next_label") or "the next section",
+        )
+        intro_transition_preface = f"{intro_ack} {section_bridge}".strip()
+
     if response_type == "answer" and is_substantial:
         schedule_elapsed_persistence(
             state,
@@ -607,7 +621,8 @@ def _apply_result(
                 "suppress_previous_context_for_next_question"
             ],
             "transition_reason": decision.get("transition_reason"),
-            "response_preface_text": forced_behavioural_preface,
+            "response_preface_text": forced_behavioural_preface
+            or intro_transition_preface,
             "should_advance_question": True,
             "should_close": False,
             "closing_reason": None,

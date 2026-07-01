@@ -47,6 +47,7 @@ class InterviewState(TypedDict, total=False):
     current_question_id: str
     current_question_text: str
     last_rephrased_question: str | None
+    last_spoken_opening_text: str | None
     current_question_difficulty: Difficulty | None
     is_self_introduction: bool
 

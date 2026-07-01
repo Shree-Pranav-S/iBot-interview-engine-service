@@ -216,6 +216,7 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
             "Could you tell me about your professional background?"
         ),
         "last_rephrased_question": None,
+        "last_spoken_opening_text": None,
         "current_question_difficulty": None,
         "is_self_introduction": True,
         "candidate_event": None,

@@ -71,6 +71,7 @@ def deliver_opening(state: InterviewState) -> dict[str, Any]:
         "bot_reply_type": "opening",
         "pending_bot_turn": pending_bot_turn,
         "asked_questions": asked_questions,
+        "last_spoken_opening_text": question_text,
         "next_action": "await_candidate_response",
         "timer_started": False,
         "timer_started_at": None,
