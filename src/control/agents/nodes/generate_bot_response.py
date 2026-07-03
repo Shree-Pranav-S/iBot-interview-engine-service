@@ -11,8 +11,13 @@ from typing import Any
 from src.control.agents.key_routing import active_turn_key_slot
 from src.control.agents.nodes.classify_response import (
     is_deterministic_classification_source,
+    self_intro_is_substantial,
 )
 from src.control.agents.nodes.llm_helpers import rephrase_with_schema
+from src.control.agents.nodes.question_strategy import (
+    current_section_name,
+    is_self_intro_phase,
+)
 from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.prompts import QUESTION_REPHRASE_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
@@ -178,7 +183,7 @@ async def _rephrase_question(
     context = {
         "original_question": question,
         "previous_rephrase": state.get("last_rephrased_question"),
-        "current_section": state.get("current_section"),
+        "current_section": current_section_name(state),
         "current_skill": state.get("current_technical_skill"),
         "question_difficulty": state.get("current_question_difficulty"),
     }
@@ -245,18 +250,19 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
 
     response_type = state.get("last_response_type")
     classification = state.get("last_classification") or {}
-    is_intro = bool(state.get("is_self_introduction"))
+    is_intro = is_self_intro_phase(state)
     question = (
         state.get("current_question_text")
         or "Could you answer the current interview question?"
     )
-    intro_repeat_text = (
-        state.get("last_spoken_opening_text")
-        or state.get("last_rephrased_question")
-        or question
-    )
+    intro_repeat_text = state.get("last_rephrased_question") or question
 
     if response_type == "silence":
+        if is_intro and self_intro_is_substantial(
+            state,
+            str(state.get("previous_candidate_response") or ""),
+        ):
+            return _continue_with_question("", "question_transition")
         stage = state.get("silence_stage") or "none"
         if stage == "none":
             return _reply(
@@ -321,8 +327,11 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
         )
 
     if response_type == "answer":
+        intro_text = str(state.get("previous_candidate_response") or "")
+        if is_intro and self_intro_is_substantial(state, intro_text):
+            return _continue_with_question("", "question_transition")
         if not bool(state.get("last_response_substantial")):
-            is_intro = bool(state.get("is_self_introduction"))
+            is_intro = is_self_intro_phase(state)
             return _reply(
                 state,
                 choose_template(

@@ -22,12 +22,13 @@ from src.control.agents.nodes.apply_question import apply_resolved_question
 from src.control.agents.nodes.classify_response import (
     BEHAVIOURAL_ANSWER_WORD_THRESHOLD,
     BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD,
-    SELF_INTRO_ELABORATION_WORD_THRESHOLD,
     _deterministic_classification,
     _resume_has_skill,
+    _self_intro_combined_text,
     _spoken_word_count,
     _turn_violations,
     is_deterministic_classification_source,
+    self_intro_is_substantial,
 )
 from src.control.agents.nodes.llm_helpers import interviewer_turn_with_schema
 from src.control.agents.nodes.persist_turn import schedule_elapsed_persistence
@@ -36,7 +37,13 @@ from src.control.agents.nodes.question_diversity import (
     recent_question_stems,
     validate_generated_question,
 )
-from src.control.agents.nodes.question_strategy import difficulty_plan
+from src.control.agents.nodes.question_strategy import (
+    behavioural_questions,
+    difficulty_plan,
+    is_self_intro_phase,
+    questions_for_skill,
+    section_expected_signals,
+)
 from src.control.agents.nodes.time_manager import decide_time_action
 from src.control.agents.prompts import INTERVIEWER_TURN_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
@@ -46,6 +53,22 @@ from src.schemas.prompts import InterviewerTurnResponse
 logger = logging.getLogger(__name__)
 
 _CONTEXT_HISTORY_LIMIT = 3
+
+
+def _self_intro_state_updates(state: InterviewState, text: str) -> dict[str, Any]:
+    """Persist cumulative self-intro speech across split turns and pauses."""
+
+    if not is_self_intro_phase(state):
+        return {}
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return {}
+    return {
+        "self_intro_accumulated_response": _self_intro_combined_text(
+            state,
+            normalized,
+        )
+    }
 
 
 def _should_finish_deterministically(det: dict[str, Any] | None) -> bool:
@@ -111,22 +134,6 @@ def _safe_merged_fallback(
     )
 
 
-def _questions_for_skill(state: InterviewState, skill: str) -> list[dict[str, Any]]:
-    return [
-        item
-        for item in (state.get("asked_questions") or [])
-        if str(item.get("skill") or "").casefold() == skill.casefold()
-    ]
-
-
-def _behavioural_questions(state: InterviewState) -> list[dict[str, Any]]:
-    return [
-        item
-        for item in (state.get("asked_questions") or [])
-        if item.get("section") == "behavioural_cultural"
-    ]
-
-
 def _recent_acknowledgements(state: InterviewState) -> list[str]:
     return [
         str(item.get("acknowledgement") or "").strip()
@@ -153,7 +160,7 @@ def _resolve_target(
     return {
         "kind": str(state.get("current_section_kind") or "technical"),
         "skill": state.get("current_technical_skill"),
-        "signals": list(state.get("current_expected_signals") or []),
+        "signals": section_expected_signals(state),
         "entering_new_section": False,
     }
 
@@ -189,7 +196,7 @@ def _interviewer_messages(
         "section_kind": target["kind"],
         "previous_candidate_response": state.get("previous_candidate_response") or "",
         "current_question": state.get("current_question_text") or "",
-        "is_self_introduction": bool(state.get("is_self_introduction")),
+        "is_self_introduction": is_self_intro_phase(state),
         "ask_next_question": ask_next_question,
         "must_close": must_close,
         "is_section_start": bool(target["entering_new_section"]),
@@ -207,7 +214,7 @@ def _interviewer_messages(
     }
 
     if is_behavioural:
-        asked = _behavioural_questions(state)
+        asked = behavioural_questions(state)
         context.update(
             {
                 "expected_signals": target["signals"],
@@ -225,7 +232,7 @@ def _interviewer_messages(
             or state.get("current_technical_skill")
             or "the role's core skill"
         )
-        asked = _questions_for_skill(state, skill)
+        asked = questions_for_skill(state, skill)
         context.update(
             {
                 "current_technical_skill": skill,
@@ -346,11 +353,9 @@ def _apply_result(
     clarification_type = result.clarification_type
     is_substantial = result.is_substantial
 
-    if response_type == "answer" and bool(state.get("is_self_introduction")):
-        # The self-introduction elaboration rule is governed by one metric only.
-        is_substantial = (
-            _spoken_word_count(text) >= SELF_INTRO_ELABORATION_WORD_THRESHOLD
-        )
+    if response_type == "answer" and is_self_intro_phase(state):
+        # The self-introduction elaboration rule uses cumulative spoken words.
+        is_substantial = self_intro_is_substantial(state, text)
     elif (
         response_type == "answer"
         and state.get("current_section_kind") == "behavioural_cultural"
@@ -442,6 +447,7 @@ def _apply_result(
         "pregenerated_closing_lead": None,
         "pending_clarification_text": None,
         "speculative_interviewer_result": None,
+        **_self_intro_state_updates(state, text),
     }
 
     logger.info(
@@ -533,7 +539,7 @@ def _apply_result(
                         question_text=question_text,
                         topic=str(pregen["topic"]),
                         skill=skill_name,
-                        asked_questions=_questions_for_skill(state, skill_name),
+                        asked_questions=questions_for_skill(state, skill_name),
                         used_topics=list(
                             (state.get("used_topics_by_skill") or {}).get(
                                 skill_name.casefold(),
@@ -563,10 +569,10 @@ def _apply_result(
                         question_text=question_text,
                         topic=str(pregen["topic"]),
                         skill="",
-                        asked_questions=_behavioural_questions(state),
+                        asked_questions=behavioural_questions(state),
                         used_topics=[
                             str(item.get("topic") or "")
-                            for item in _behavioural_questions(state)
+                            for item in behavioural_questions(state)
                             if item.get("topic")
                         ],
                         allow_related_probe=False,
@@ -676,14 +682,13 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
     if det is not None and _should_finish_deterministically(det):
         return _finish_deterministic(state, det, started_at)
 
-    if bool(state.get("is_self_introduction")):
+    if is_self_intro_phase(state):
         # Self-intro routing is fully deterministic: avoid LLM misclassification
-        # and use only spoken-word count to determine substantiality.
-        word_count = _spoken_word_count(text)
+        # and use cumulative spoken-word count to determine substantiality.
         deterministic_result = InterviewerTurnResponse(
             response_type="answer",
             clarification_type=None,
-            is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
+            is_substantial=self_intro_is_substantial(state, text),
             answer_strength=None,
             acknowledgement=None,
             question_text=None,

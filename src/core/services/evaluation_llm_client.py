@@ -1,4 +1,4 @@
-"""NVIDIA NIM client for direct or two-stage holistic evaluation."""
+"""NVIDIA NIM client for single-stage holistic evaluation."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from openai import (
     APIConnectionError,
     APIError,
@@ -32,12 +33,9 @@ from src.core.services.evaluation_errors import (
 )
 from src.core.services.evaluation_prompt import (
     HOLISTIC_EVALUATION_SYSTEM_PROMPT,
-    QUESTION_FACT_EXTRACTION_SYSTEM_PROMPT,
 )
 from src.schemas.evaluation_llm import (
-    ExtractedQuestionFact,
     HolisticEvaluationLLMOutput,
-    QuestionFactExtractionOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -383,10 +381,9 @@ def _validate_output(
 
 def _base_messages(
     bundle: EvaluationContextBundle,
-    question_facts: QuestionFactExtractionOutput | None = None,
 ) -> list[ChatCompletionMessageParam]:
     """
-    Construct the base chat messages to prompt the LLM for evaluation.
+    Construct the chat messages to prompt the LLM for single-stage evaluation.
 
     Args:
         bundle: The full evaluation context bundle.
@@ -396,16 +393,8 @@ def _base_messages(
     """
     evaluation_input = bundle.evaluation_input.model_dump(mode="json")
     # Raw turns remain persisted and hashed, but the scorer receives only the
-    # deterministic Q&A representation (or compact first-stage facts).
+    # deterministic Q&A representation.
     evaluation_input.pop("transcript", None)
-    if question_facts is not None:
-        evaluation_input.pop("qa_pairs", None)
-        evaluation_input["evidence_mode"] = "two_stage_question_facts"
-        evaluation_input["question_facts"] = question_facts.model_dump(mode="json")[
-            "question_facts"
-        ]
-    else:
-        evaluation_input["evidence_mode"] = "direct_qa_pairs"
     input_json = json.dumps(
         evaluation_input,
         ensure_ascii=False,
@@ -434,137 +423,6 @@ def _base_messages(
     ]
 
 
-def _requires_two_stage(bundle: EvaluationContextBundle) -> bool:
-    qa_payload = json.dumps(
-        [item.model_dump(mode="json") for item in bundle.evaluation_input.qa_pairs],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return (
-        len(bundle.evaluation_input.qa_pairs)
-        >= settings.NVIDIA_NIM_TWO_STAGE_QA_THRESHOLD
-        or len(qa_payload) >= settings.NVIDIA_NIM_TWO_STAGE_INPUT_CHARS
-    )
-
-
-def _normalize_question_facts(
-    output: QuestionFactExtractionOutput,
-    bundle: EvaluationContextBundle,
-) -> QuestionFactExtractionOutput:
-    expected = bundle.evaluation_input.qa_pairs
-    actual_ids = [item.question_id for item in output.question_facts]
-    expected_ids = [item.question_id for item in expected]
-    if actual_ids != expected_ids:
-        raise EvaluationSchemaError(
-            "question_facts must contain each authoritative question_id exactly "
-            f"once and in input order: {expected_ids}"
-        )
-
-    normalized: list[ExtractedQuestionFact] = []
-    for fact, pair in zip(output.question_facts, expected, strict=True):
-        value = fact.model_dump(mode="json")
-        for field in (
-            "question_id",
-            "section",
-            "skill",
-            "difficulty",
-            "question_text",
-            "answered",
-            "response_types",
-        ):
-            value[field] = getattr(pair, field)
-        normalized.append(ExtractedQuestionFact.model_validate(value))
-    return QuestionFactExtractionOutput(question_facts=normalized)
-
-
-def _extraction_messages(
-    bundle: EvaluationContextBundle,
-) -> list[ChatCompletionMessageParam]:
-    input_json = json.dumps(
-        {
-            "candidate": bundle.evaluation_input.candidate.model_dump(mode="json"),
-            "qa_pairs": [
-                item.model_dump(mode="json")
-                for item in bundle.evaluation_input.qa_pairs
-            ],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    schema_json = json.dumps(
-        QuestionFactExtractionOutput.model_json_schema(),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return [
-        {"role": "system", "content": QUESTION_FACT_EXTRACTION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"EXTRACTION_INPUT_JSON:\n{input_json}\n\n"
-                f"REQUIRED_OUTPUT_SCHEMA:\n{schema_json}\n\n"
-                "Extract the question facts now. Return strict JSON only."
-            ),
-        },
-    ]
-
-
-def _validate_question_facts(
-    raw: str,
-    bundle: EvaluationContextBundle,
-) -> tuple[QuestionFactExtractionOutput, dict[str, Any]]:
-    parsed = _extract_json_object(raw)
-    try:
-        output = QuestionFactExtractionOutput.model_validate(parsed)
-    except ValidationError as exc:
-        raise EvaluationSchemaError(str(exc)) from exc
-    return _normalize_question_facts(output, bundle), parsed
-
-
-async def _extract_question_facts(
-    bundle: EvaluationContextBundle,
-) -> tuple[QuestionFactExtractionOutput, dict[str, Any]]:
-    raw = await _complete(_extraction_messages(bundle), enable_reasoning=False)
-    try:
-        return _validate_question_facts(raw, bundle)
-    except EvaluationSchemaError as exc:
-        schema_json = json.dumps(
-            QuestionFactExtractionOutput.model_json_schema(),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        expected_ids = [item.question_id for item in bundle.evaluation_input.qa_pairs]
-        repair_messages: list[ChatCompletionMessageParam] = [
-            {
-                "role": "system",
-                "content": (
-                    "Repair an interview fact-extraction JSON object. Return one "
-                    "strict JSON object only. Preserve evidence; fix only schema, "
-                    "question coverage, identifiers, and ordering."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"INVALID_JSON:\n{raw}\n\n"
-                    f"VALIDATION_ERRORS:\n{exc}\n\n"
-                    f"AUTHORITATIVE_QUESTION_IDS:\n"
-                    f"{json.dumps(expected_ids, separators=(',', ':'))}\n\n"
-                    f"REQUIRED_OUTPUT_SCHEMA:\n{schema_json}\n\n"
-                    "Repair the JSON now."
-                ),
-            },
-        ]
-        repaired_raw = await _complete(repair_messages, enable_reasoning=False)
-        try:
-            return _validate_question_facts(repaired_raw, bundle)
-        except EvaluationSchemaError as repaired_exc:
-            raise EvaluationSchemaError(
-                "NVIDIA question-fact extraction remained invalid after repair: "
-                f"{repaired_exc}"
-            ) from repaired_exc
-
-
 def _retry_after_seconds(exc: APIStatusError) -> int | None:
     """
     Extract the 'retry-after' header from an API error response.
@@ -584,11 +442,36 @@ def _retry_after_seconds(exc: APIStatusError) -> int | None:
         return None
 
 
+async def _complete_non_stream(
+    messages: list[ChatCompletionMessageParam],
+    *,
+    extra_body: dict[str, Any],
+    use_fallback: bool,
+    t0: float,
+) -> tuple[str, float]:
+    """Execute one non-streaming NVIDIA NIM completion."""
+    completion_response = await _get_client(use_fallback).chat.completions.create(
+        model=settings.NVIDIA_NIM_MODEL,
+        messages=messages,
+        temperature=settings.NVIDIA_NIM_TEMPERATURE,
+        top_p=settings.NVIDIA_NIM_TOP_P,
+        max_tokens=settings.NVIDIA_NIM_MAX_TOKENS,
+        response_format={"type": "json_object"},
+        extra_body=extra_body,
+        stream=False,
+    )
+    if not completion_response.choices:
+        raise TransientEvaluationError("NVIDIA NIM returned no evaluation choices")
+    content = completion_response.choices[0].message.content
+    return str(content or ""), time.monotonic() - t0
+
+
 async def _complete(
     messages: list[ChatCompletionMessageParam],
     *,
     enable_reasoning: bool = True,
     use_fallback: bool = False,
+    force_non_stream: bool = False,
 ) -> str:
     """
     Execute a chat completion call to the NVIDIA NIM LLM.
@@ -612,11 +495,13 @@ async def _complete(
             "reasoning_enabled": enable_reasoning,
             "timeout_secs": settings.NVIDIA_NIM_TIMEOUT_SECS,
             "max_tokens": settings.NVIDIA_NIM_MAX_TOKENS,
-            "stream": settings.NVIDIA_NIM_STREAM,
+            "stream": settings.NVIDIA_NIM_STREAM and not force_non_stream,
             "message_chars": message_chars,
         },
     )
     t0 = time.monotonic()
+    content = ""
+    elapsed = 0.0
     try:
         extra_body: dict[str, Any] = {
             "chat_template_kwargs": {
@@ -625,73 +510,78 @@ async def _complete(
         }
         if enable_reasoning:
             extra_body["reasoning_budget"] = settings.NVIDIA_NIM_REASONING_BUDGET
-        if settings.NVIDIA_NIM_STREAM:
-            stream_response = await _get_client(use_fallback).chat.completions.create(
-                model=settings.NVIDIA_NIM_MODEL,
-                messages=messages,
-                temperature=settings.NVIDIA_NIM_TEMPERATURE,
-                top_p=settings.NVIDIA_NIM_TOP_P,
-                max_tokens=settings.NVIDIA_NIM_MAX_TOKENS,
-                response_format={"type": "json_object"},
-                extra_body=extra_body,
-                stream=True,
-            )
-            content_parts: list[str] = []
-            reasoning_chars = 0
-            chunk_count = 0
-            first_chunk_secs: float | None = None
-            async for chunk in stream_response:
-                chunk_count += 1
-                if first_chunk_secs is None:
-                    first_chunk_secs = time.monotonic() - t0
-                    logger.info(
-                        "NVIDIA NIM stream opened after %.1f seconds",
-                        first_chunk_secs,
-                    )
-                for choice in chunk.choices:
-                    delta = choice.delta
-                    content = getattr(delta, "content", None)
-                    if content:
-                        content_parts.append(str(content))
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        reasoning_chars += len(str(reasoning))
-            content = "".join(content_parts)
-            elapsed = time.monotonic() - t0
-            logger.info(
-                "NVIDIA NIM stream completed in %.1f seconds",
-                elapsed,
-                extra={
-                    "elapsed_secs": round(elapsed, 1),
-                    "first_chunk_secs": (
-                        round(first_chunk_secs, 1)
-                        if first_chunk_secs is not None
-                        else None
-                    ),
-                    "chunk_count": chunk_count,
-                    "reasoning_chars": reasoning_chars,
-                    "response_length": len(content),
-                },
-            )
-        else:
-            completion_response = await _get_client(
-                use_fallback
-            ).chat.completions.create(
-                model=settings.NVIDIA_NIM_MODEL,
-                messages=messages,
-                temperature=settings.NVIDIA_NIM_TEMPERATURE,
-                top_p=settings.NVIDIA_NIM_TOP_P,
-                max_tokens=settings.NVIDIA_NIM_MAX_TOKENS,
-                response_format={"type": "json_object"},
-                extra_body=extra_body,
-                stream=False,
-            )
-            if not completion_response.choices:
-                raise TransientEvaluationError(
-                    "NVIDIA NIM returned no evaluation choices"
+        if settings.NVIDIA_NIM_STREAM and not force_non_stream:
+            try:
+                stream_response = await _get_client(
+                    use_fallback
+                ).chat.completions.create(
+                    model=settings.NVIDIA_NIM_MODEL,
+                    messages=messages,
+                    temperature=settings.NVIDIA_NIM_TEMPERATURE,
+                    top_p=settings.NVIDIA_NIM_TOP_P,
+                    max_tokens=settings.NVIDIA_NIM_MAX_TOKENS,
+                    response_format={"type": "json_object"},
+                    extra_body=extra_body,
+                    stream=True,
                 )
-            content = completion_response.choices[0].message.content
-            elapsed = time.monotonic() - t0
+                content_parts: list[str] = []
+                reasoning_chars = 0
+                chunk_count = 0
+                first_chunk_secs: float | None = None
+                async for chunk in stream_response:
+                    chunk_count += 1
+                    if first_chunk_secs is None:
+                        first_chunk_secs = time.monotonic() - t0
+                        logger.info(
+                            "NVIDIA NIM stream opened after %.1f seconds",
+                            first_chunk_secs,
+                        )
+                    for choice in chunk.choices:
+                        delta = choice.delta
+                        delta_content = getattr(delta, "content", None)
+                        if delta_content:
+                            content_parts.append(str(delta_content))
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            reasoning_chars += len(str(reasoning))
+                content = "".join(content_parts)
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "NVIDIA NIM stream completed in %.1f seconds",
+                    elapsed,
+                    extra={
+                        "elapsed_secs": round(elapsed, 1),
+                        "first_chunk_secs": (
+                            round(first_chunk_secs, 1)
+                            if first_chunk_secs is not None
+                            else None
+                        ),
+                        "chunk_count": chunk_count,
+                        "reasoning_chars": reasoning_chars,
+                        "response_length": len(content),
+                    },
+                )
+            except httpx.TransportError as exc:
+                elapsed = time.monotonic() - t0
+                logger.warning(
+                    "NVIDIA NIM stream interrupted after %.1f seconds; "
+                    "retrying with non-streaming completion: %s",
+                    elapsed,
+                    exc,
+                )
+                content, elapsed = await _complete_non_stream(
+                    messages,
+                    extra_body=extra_body,
+                    use_fallback=use_fallback,
+                    t0=time.monotonic(),
+                )
+        else:
+            content, elapsed = await _complete_non_stream(
+                messages,
+                extra_body=extra_body,
+                use_fallback=use_fallback,
+                t0=t0,
+            )
     except APITimeoutError as exc:
         elapsed = time.monotonic() - t0
         logger.error(
@@ -711,6 +601,17 @@ async def _complete(
             exc,
         )
         raise TransientEvaluationError(f"NVIDIA NIM connection error: {exc}") from exc
+    except httpx.TransportError as exc:
+        elapsed = time.monotonic() - t0
+        logger.error(
+            "NVIDIA NIM transport error after %.1f seconds: %s",
+            elapsed,
+            exc,
+        )
+        raise TransientEvaluationError(
+            f"NVIDIA NIM transport error: {exc}",
+            retry_after_seconds=60,
+        ) from exc
     except RateLimitError as exc:
         elapsed = time.monotonic() - t0
         retry_after = _retry_after_seconds(exc)
@@ -795,7 +696,7 @@ async def run_nvidia_holistic_evaluation(
     bundle: EvaluationContextBundle,
 ) -> NvidiaEvaluationResult:
     """
-    Run one evaluation and, only if needed, one lightweight JSON repair.
+    Run one single-stage evaluation and, only if needed, one lightweight JSON repair.
 
     Args:
         bundle: The fully built and validated evaluation context bundle.
@@ -817,21 +718,7 @@ async def run_nvidia_holistic_evaluation(
         },
     )
 
-    question_facts: QuestionFactExtractionOutput | None = None
-    extraction_raw: dict[str, Any] | None = None
-    pipeline = "direct_qa"
-    if _requires_two_stage(bundle):
-        pipeline = "extract_then_score"
-        logger.info(
-            "Long interview detected; extracting question facts before scoring",
-            extra={
-                "candidate_assessment_id": candidate_id,
-                "question_count": len(bundle.evaluation_input.qa_pairs),
-            },
-        )
-        question_facts, extraction_raw = await _extract_question_facts(bundle)
-
-    messages = _base_messages(bundle, question_facts)
+    messages = _base_messages(bundle)
     logger.info(
         "NVIDIA evaluation LLM attempt 1/1",
         extra={"candidate_assessment_id": candidate_id},
@@ -846,8 +733,7 @@ async def run_nvidia_holistic_evaluation(
         return NvidiaEvaluationResult(
             output=result.output,
             raw_output={
-                "pipeline": pipeline,
-                "question_fact_extraction": extraction_raw,
+                "pipeline": "direct_qa",
                 "evaluation": result.raw_output,
             },
         )
@@ -908,8 +794,7 @@ async def run_nvidia_holistic_evaluation(
         return NvidiaEvaluationResult(
             output=repaired.output,
             raw_output={
-                "pipeline": pipeline,
-                "question_fact_extraction": extraction_raw,
+                "pipeline": "direct_qa",
                 "evaluation": repaired.raw_output,
                 "evaluation_repaired": True,
             },

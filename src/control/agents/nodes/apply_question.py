@@ -45,7 +45,6 @@ def apply_resolved_question(
     section_index, section = target_section(state)
     section_kind = str(section.get("section_kind") or "technical")
     section_name = str(section.get("section_name") or "technical")
-    expected_signals = list(section.get("expected_signals") or [])
     entering_new_section = (
         section_index != int(state.get("current_section_index") or 0)
         or state.get("pending_section_index") is not None
@@ -140,16 +139,13 @@ def apply_resolved_question(
     )
     next_state: InterviewState = {
         **state,
-        "current_section": section_name,
         "current_section_index": section_index,
         "current_section_kind": section_kind,  # type: ignore[typeddict-item]
         "current_technical_skill": current_skill,
-        "current_expected_signals": expected_signals,
         "current_question_id": question_id,
         "current_question_text": question_text,
         "last_rephrased_question": None,
         "current_question_difficulty": current_difficulty,
-        "is_self_introduction": False,
         "current_section_budget_secs": section_budget,
         "current_section_started_elapsed_secs": section_started_elapsed,
         "current_section_elapsed_secs": section_elapsed,
@@ -188,16 +184,13 @@ def apply_resolved_question(
         used_topics.setdefault(current_skill.casefold(), []).append(topic)
 
     return {
-        "current_section": section_name,
         "current_section_index": section_index,
         "current_section_kind": section_kind,
         "current_technical_skill": current_skill,
-        "current_expected_signals": expected_signals,
         "current_question_id": question_id,
         "current_question_text": question_text,
         "last_rephrased_question": None,
         "current_question_difficulty": current_difficulty,
-        "is_self_introduction": False,
         "probe_deeper": probe_deeper,
         "thread_follow_up_used": thread_follow_up_used,
         "asked_questions": asked_questions,
@@ -222,6 +215,7 @@ def apply_resolved_question(
         "response_preface_text": None,
         "skip_attempts_for_current_question": 0,
         "self_intro_elaboration_requested": False,
+        "self_intro_accumulated_response": "",
         "should_advance_question": False,
         "phase_complete": False,
         "latest_evaluation": None,

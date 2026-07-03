@@ -62,7 +62,6 @@ def _get_groq_client(purpose: str, api_key: str) -> AsyncGroq:
     if cache_key not in _clients:
         timeouts = {
             "classification": settings.GROQ_CLASSIFY_TIMEOUT_SECS,
-            "evaluation": settings.GROQ_LIVE_EVAL_TIMEOUT_SECS,
             "question": settings.GROQ_QUESTION_TIMEOUT_SECS,
             "interviewer": settings.GROQ_INTERVIEWER_TIMEOUT_SECS,
         }
@@ -272,42 +271,6 @@ async def _call_with_fallback(
     if last_exc is not None:
         raise last_exc
     raise RuntimeError(f"No healthy Groq key was available for {purpose}.")
-
-
-async def classify(
-    messages: list[dict[str, str]],
-    response_model: type[ResponseModelT],
-    *,
-    key_slot: int | None = None,
-) -> ResponseModelT:
-    """Classify one candidate response through strict Structured Outputs."""
-    return await _call_with_fallback(
-        purpose="classification",
-        response_model=response_model,
-        key_slot=key_slot,
-        model=settings.GROQ_CLASSIFY_MODEL,
-        messages=messages,
-        max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
-        temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
-    )
-
-
-async def live_evaluate(
-    messages: list[dict[str, str]],
-    response_model: type[ResponseModelT],
-    *,
-    key_slot: int | None = None,
-) -> ResponseModelT:
-    """Evaluate one substantial answer through strict Structured Outputs."""
-    return await _call_with_fallback(
-        purpose="evaluation",
-        response_model=response_model,
-        key_slot=key_slot,
-        model=settings.GROQ_LIVE_EVAL_MODEL,
-        messages=messages,
-        max_tokens=settings.GROQ_LIVE_EVAL_MAX_TOKENS,
-        temperature=settings.GROQ_LIVE_EVAL_TEMPERATURE,
-    )
 
 
 async def generate(

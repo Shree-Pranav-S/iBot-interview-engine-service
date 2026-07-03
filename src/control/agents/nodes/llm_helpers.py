@@ -11,57 +11,6 @@ from src.core.services import llm_service
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 
-async def classify_with_schema(
-    messages: list[dict[str, str]],
-    response_model: type[ResponseModelT],
-    *,
-    key_slot: int | None = None,
-) -> ResponseModelT:
-    """
-    Call the classifier with its API-enforced Pydantic contract.
-
-    Args:
-        messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the response structure.
-
-    Returns:
-        A validated instance of the response model.
-
-    Raises:
-        ValidationError: If semantic Pydantic validators reject the response.
-    """
-
-    return await llm_service.classify(
-        messages,
-        response_model,
-        key_slot=key_slot,
-    )
-
-
-async def evaluate_with_schema(
-    messages: list[dict[str, str]],
-    response_model: type[ResponseModelT],
-    *,
-    key_slot: int | None = None,
-) -> ResponseModelT:
-    """
-    Call the live evaluator LLM and reject anything outside its contract.
-
-    Args:
-        messages: The chat history to send to the LLM.
-        response_model: The Pydantic model defining the response structure.
-
-    Returns:
-        A validated instance of the response model.
-    """
-
-    return await llm_service.live_evaluate(
-        messages,
-        response_model,
-        key_slot=key_slot,
-    )
-
-
 async def generate_with_schema(
     messages: list[dict[str, str]],
     response_model: type[ResponseModelT],

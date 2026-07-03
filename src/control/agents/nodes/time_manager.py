@@ -8,6 +8,7 @@ from src.control.agents.nodes.persist_turn import (
     persist_candidate_output,
     schedule_elapsed_persistence,
 )
+from src.control.agents.nodes.question_strategy import current_section_name
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
 
@@ -258,7 +259,7 @@ def _transition(
     """
     current_label = _section_label(
         None,
-        str(state.get("current_section") or "this section"),
+        current_section_name(state),
     )
     next_label = _section_label(next_section, "the next section")
     preface = choose_template(
@@ -283,8 +284,7 @@ def decide_time_action(state: InterviewState) -> dict[str, Any]:
     """
     Decide what should follow a (hypothetically) substantial answer, without an LLM.
 
-    This is the deterministic core of ``check_time_after_substantial_answer`` exposed
-    as a pure helper so the merged interviewer-turn node can resolve the target
+    Pure helper so the merged interviewer-turn node can resolve the target
     section before asking the model to generate the next question. The decision uses
     only elapsed time and section budgets, so it is identical whether computed before
     or after classification.
@@ -302,7 +302,7 @@ def decide_time_action(state: InterviewState) -> dict[str, Any]:
     next_section = _next_section(state)
     current_label = _section_label(
         None,
-        str(state.get("current_section") or "this section"),
+        current_section_name(state),
     )
 
     def _close(reason: str) -> dict[str, Any]:
@@ -396,94 +396,6 @@ def decide_time_action(state: InterviewState) -> dict[str, Any]:
         "next_label": current_label,
         "next_index": None,
         "next_section": None,
-    }
-
-
-async def check_time_after_substantial_answer(
-    state: InterviewState,
-) -> dict[str, Any]:
-    """
-    Check timing on the event loop after a substantial candidate answer.
-
-    This node determines if the interview should continue with another question
-    in the current section, transition to the next section, or close out entirely.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        State updates containing the routing logic and timing values.
-    """
-
-    timing = _timing(state)
-    schedule_elapsed_persistence(
-        state,
-        elapsed_secs=timing["elapsed_secs"],
-    )
-
-    if timing["remaining_secs"] <= 0:
-        return _closing(timing, reason="interview_time_exhausted")
-
-    behavioural_rescue = _behavioural_rescue_section(state)
-    if (
-        behavioural_rescue is not None
-        and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS
-    ):
-        next_index, section = behavioural_rescue
-        return _transition(
-            state,
-            timing,
-            next_index=next_index,
-            next_section=section,
-            reason="behavioural_time_rescue",
-            template_name="behavioural_forced_transition",
-            barge_in=False,
-        )
-
-    next_section = _next_section(state)
-    if state.get("current_section_kind") == "self_intro":
-        if next_section is None:
-            return _closing(timing, reason="interview_plan_complete")
-        next_index, section = next_section
-        return _transition(
-            state,
-            timing,
-            next_index=next_index,
-            next_section=section,
-            reason="self_introduction_complete",
-            template_name="section_transition",
-            barge_in=False,
-        )
-
-    if (
-        next_section is None
-        and timing["remaining_secs"] <= SECTION_TRANSITION_THRESHOLD_SECS
-    ):
-        return _closing(timing, reason="interview_time_exhausted")
-
-    section_time_low = (
-        timing["section_elapsed_secs"] >= timing["section_budget_secs"]
-        or timing["section_remaining_secs"] <= SECTION_TRANSITION_THRESHOLD_SECS
-    )
-    if section_time_low:
-        if next_section is None:
-            return _closing(timing, reason="final_section_complete")
-        next_index, section = next_section
-        return _transition(
-            state,
-            timing,
-            next_index=next_index,
-            next_section=section,
-            reason="section_time_exhausted",
-            template_name="timed_section_transition",
-            barge_in=False,
-        )
-
-    return {
-        **_timing_updates(timing),
-        "next_action": "generate_question",
-        "should_close": False,
-        "closing_reason": None,
     }
 
 

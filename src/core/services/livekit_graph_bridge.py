@@ -16,6 +16,7 @@ from src.control.agents.graphs import get_graph
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
 )
+from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.nodes.speculative_interviewer import (
     SpeculativeCacheEntry,
     cache_matches_final,
@@ -261,9 +262,7 @@ class LiveKitInterviewBridge:
             return
         if self.state.get("phase_complete"):
             return
-        if self.state.get("is_self_introduction") or (
-            self.state.get("current_section_kind") == "self_intro"
-        ):
+        if is_self_intro_phase(self.state):
             return
 
         self._cancel_speculative_warm()

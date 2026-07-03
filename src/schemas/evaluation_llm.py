@@ -102,30 +102,6 @@ class EvaluationInput(EvaluationModel):
     violations: list[dict[str, Any]]
 
 
-class ExtractedQuestionFact(EvaluationModel):
-    """Compact evidence extracted from a Q&A pair before long-form scoring."""
-
-    question_id: str = Field(min_length=1, max_length=180)
-    section: str = Field(min_length=1, max_length=180)
-    skill: str | None = Field(default=None, max_length=180)
-    difficulty: str = Field(default="unknown", max_length=80)
-    question_text: str = Field(min_length=1, max_length=5000)
-    answered: bool
-    answer_summary: str = Field(min_length=1, max_length=2400)
-    response_types: list[str] = Field(default_factory=list, max_length=24)
-    relevance_class: RelevanceClass
-    demonstrated_signals: list[str] = Field(default_factory=list, max_length=20)
-    missing_or_incorrect: list[str] = Field(default_factory=list, max_length=20)
-    evidence: list[str] = Field(min_length=1, max_length=20)
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
-class QuestionFactExtractionOutput(EvaluationModel):
-    """First-stage output for long interviews."""
-
-    question_facts: list[ExtractedQuestionFact] = Field(min_length=1)
-
-
 class SkillScoreOutput(EvaluationModel):
     score: float = Field(ge=0.0, le=10.0)
     priority_score: float = Field(ge=0.0, le=10.0)

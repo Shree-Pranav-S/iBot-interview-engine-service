@@ -305,3 +305,69 @@ def difficulty_plan(
             "follow_interesting_thread": thread_eligible,
         },
     }
+
+
+def active_section(state: InterviewState | dict[str, Any]) -> dict[str, Any]:
+    """Return the runtime section record for the active section index."""
+
+    sections = list(state.get("runtime_sections") or [])
+    if not sections:
+        return {}
+    index = int(state.get("current_section_index") or 0)
+    bounded = min(max(0, index), len(sections) - 1)
+    return sections[bounded]
+
+
+def current_section_name(state: InterviewState | dict[str, Any]) -> str:
+    """Return the display name for the active section."""
+
+    name = str(active_section(state).get("section_name") or "").strip()
+    if name:
+        return name
+    legacy = str(state.get("current_section") or "").strip()
+    return legacy or "this section"
+
+
+def section_expected_signals(state: InterviewState | dict[str, Any]) -> list[str]:
+    """Return expected signals for the active section."""
+
+    signals = active_section(state).get("expected_signals")
+    if isinstance(signals, list) and signals:
+        return [str(item) for item in signals]
+    legacy = state.get("current_expected_signals")
+    if isinstance(legacy, list):
+        return [str(item) for item in legacy]
+    return []
+
+
+def is_self_intro_phase(state: InterviewState | dict[str, Any]) -> bool:
+    """Return whether the interview is in the self-introduction section."""
+
+    kind = state.get("current_section_kind")
+    if kind == "self_intro":
+        return True
+    if kind is not None:
+        return False
+    # Legacy checkpoints written before redundant-state cleanup.
+    return bool(state.get("is_self_introduction"))
+
+
+def questions_for_skill(state: InterviewState, skill: str) -> list[dict[str, Any]]:
+    """Return asked questions filtered to one technical skill."""
+
+    skill_key = skill.casefold()
+    return [
+        item
+        for item in (state.get("asked_questions") or [])
+        if str(item.get("skill") or "").casefold() == skill_key
+    ]
+
+
+def behavioural_questions(state: InterviewState) -> list[dict[str, Any]]:
+    """Return asked questions from the behavioural/cultural section."""
+
+    return [
+        item
+        for item in (state.get("asked_questions") or [])
+        if item.get("section") == "behavioural_cultural"
+    ]

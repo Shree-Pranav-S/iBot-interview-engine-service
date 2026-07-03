@@ -35,7 +35,6 @@ class InterviewState(TypedDict, total=False):
     runtime_sections: list[dict[str, Any]]
 
     # Active section and question.
-    current_section: str
     current_section_index: int
     current_section_kind: Literal[
         "self_intro",
@@ -43,13 +42,10 @@ class InterviewState(TypedDict, total=False):
         "behavioural_cultural",
     ]
     current_technical_skill: str | None
-    current_expected_signals: list[str]
     current_question_id: str
     current_question_text: str
     last_rephrased_question: str | None
-    last_spoken_opening_text: str | None
     current_question_difficulty: Difficulty | None
-    is_self_introduction: bool
 
     # LiveKit input for the current turn.
     candidate_event: dict[str, Any] | str | None
@@ -92,6 +88,7 @@ class InterviewState(TypedDict, total=False):
     silence_stage: SilenceStage
     skip_attempts_for_current_question: int
     self_intro_elaboration_requested: bool
+    self_intro_accumulated_response: str
     should_advance_question: bool
     phase_complete: bool
     next_action: str | None

@@ -16,7 +16,9 @@ from src.control.agents.nodes.question_diversity import (
     validate_unique_question,
 )
 from src.control.agents.nodes.question_strategy import (
+    behavioural_questions,
     determine_question_difficulty,
+    questions_for_skill,
     target_section,
 )
 from src.control.agents.prompts import (
@@ -52,7 +54,7 @@ _FALLBACK_CONCEPTS = (
 def _fallback_concept_for_skill(state: InterviewState, skill: str) -> str:
     """Pick an unused fallback concept for this skill (last-resort path only)."""
 
-    asked = _questions_for_skill(state, skill)
+    asked = questions_for_skill(state, skill)
     used_topics = {
         str(topic).casefold()
         for topic in (state.get("used_topics_by_skill") or {}).get(skill.casefold(), [])
@@ -61,44 +63,6 @@ def _fallback_concept_for_skill(state: InterviewState, skill: str) -> str:
         if concept.casefold() not in used_topics:
             return concept
     return _FALLBACK_CONCEPTS[len(asked) % len(_FALLBACK_CONCEPTS)]
-
-
-def _questions_for_skill(
-    state: InterviewState,
-    skill: str,
-) -> list[dict[str, Any]]:
-    """
-    Retrieve all previously asked questions targeting a specific technical skill.
-
-    Args:
-        state: The current interview state.
-        skill: The skill to filter by.
-
-    Returns:
-        A list of question records.
-    """
-    return [
-        item
-        for item in (state.get("asked_questions") or [])
-        if str(item.get("skill") or "").casefold() == skill.casefold()
-    ]
-
-
-def _behavioural_questions(state: InterviewState) -> list[dict[str, Any]]:
-    """
-    Retrieve all previously asked questions from the behavioural/cultural section.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        A list of behavioural question records.
-    """
-    return [
-        item
-        for item in (state.get("asked_questions") or [])
-        if item.get("section") == "behavioural_cultural"
-    ]
 
 
 def _recent_acknowledgements(state: InterviewState) -> list[str]:
@@ -160,7 +124,7 @@ def _technical_messages(
     Returns:
         A list of chat messages for the LLM.
     """
-    asked = _questions_for_skill(state, skill)
+    asked = questions_for_skill(state, skill)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
     sequence_number = len(state.get("asked_questions") or []) + 1
     seed = str(state.get("question_variation_seed") or "")
@@ -224,7 +188,7 @@ def _behavioural_messages(
     Returns:
         A list of chat messages for the LLM.
     """
-    asked = _behavioural_questions(state)
+    asked = behavioural_questions(state)
     suppress_previous = bool(state.get("suppress_previous_context_for_next_question"))
     sequence_number = len(state.get("asked_questions") or []) + 1
     seed = str(state.get("question_variation_seed") or "")
@@ -285,7 +249,7 @@ async def _generate_technical(
         target_difficulty=target_difficulty,
         probe_deeper=probe_deeper,
     )
-    asked = _questions_for_skill(state, skill)
+    asked = questions_for_skill(state, skill)
     recent_acknowledgements = _recent_acknowledgements(state)
     try:
         result = await generate_with_schema(
@@ -372,7 +336,7 @@ async def _generate_behavioural(
         state,
         expected_signals=expected_signals,
     )
-    asked = _behavioural_questions(state)
+    asked = behavioural_questions(state)
     recent_acknowledgements = _recent_acknowledgements(state)
     try:
         result = await generate_with_schema(
@@ -474,7 +438,7 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
                     question_text=candidate_question,
                     topic=topic_candidate,
                     skill=skill,
-                    asked_questions=_questions_for_skill(state, skill),
+                    asked_questions=questions_for_skill(state, skill),
                     used_topics=list(
                         (state.get("used_topics_by_skill") or {}).get(
                             skill.casefold(),
@@ -538,10 +502,10 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
                     question_text=candidate_question,
                     topic=topic_candidate,
                     skill="",
-                    asked_questions=_behavioural_questions(state),
+                    asked_questions=behavioural_questions(state),
                     used_topics=[
                         str(item.get("topic") or "")
-                        for item in _behavioural_questions(state)
+                        for item in behavioural_questions(state)
                         if item.get("topic")
                     ],
                     allow_related_probe=False,

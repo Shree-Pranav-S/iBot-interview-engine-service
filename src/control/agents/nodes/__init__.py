@@ -1,1 +1,1 @@
-"""Phase-one LangGraph nodes."""
+"""LangGraph nodes for the live interview workflow."""

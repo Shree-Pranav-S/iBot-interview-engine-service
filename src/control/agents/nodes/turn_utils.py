@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.control.agents.nodes.question_strategy import (
+    current_section_name,
+    section_expected_signals,
+)
 from src.control.agents.state import InterviewState
 from src.utils.interview_graph import deterministic_turn_id, utc_now_iso
 
@@ -46,14 +50,14 @@ def build_bot_turn(
         "response_type": None,
         "question_type": question_type,
         "current_skill": state.get("current_technical_skill"),
-        "current_section": state.get("current_section"),
+        "current_section": current_section_name(state),
         "question_id": state.get("current_question_id"),
         "timestamp": utc_now_iso(),
         "metadata": {
             "question_type": question_type,
             "question_text": question_text,
             "acknowledgement": acknowledgement,
-            "expected_signals": list(state.get("current_expected_signals") or []),
+            "expected_signals": section_expected_signals(state),
             "topic": topic,
             "inferred_difficulty": state.get("inferred_difficulty"),
             "transition_reason": state.get("transition_reason"),
@@ -70,10 +74,9 @@ def build_candidate_turn(
     event: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Build a candidate item; classification enriches it before persistence.
+    Build a candidate item; interviewer_turn enriches it before persistence.
 
-    Constructs the base dictionary representing the candidate's speech. The
-    classifier node will later append `response_type` and evaluation results.
+    Constructs the base dictionary representing the candidate's speech.
 
     Args:
         state: The current interview state.
@@ -94,7 +97,7 @@ def build_candidate_turn(
         "response_type": None,
         "question_type": None,
         "current_skill": state.get("current_technical_skill"),
-        "current_section": state.get("current_section"),
+        "current_section": current_section_name(state),
         "question_id": state.get("current_question_id"),
         "timestamp": event.get("received_at") or utc_now_iso(),
         "metadata": {

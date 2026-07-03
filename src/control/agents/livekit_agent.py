@@ -31,6 +31,7 @@ from livekit.plugins import deepgram
 
 from src.config.settings import settings
 from src.control.agents.nodes.classify_response import will_bypass_interviewer_llm
+from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template_avoiding
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
@@ -518,12 +519,6 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._user_turn_started_at = None
         self._last_user_turn_finished_at = time.monotonic()
 
-    @staticmethod
-    def _is_self_intro_phase(state: dict) -> bool:
-        return bool(state.get("is_self_introduction")) or (
-            state.get("current_section_kind") == "self_intro"
-        )
-
     def track_user_transcription(self, text: str, *, is_final: bool) -> None:
         """
         Accumulate final STT chunks and retain the latest interim suffix.
@@ -631,7 +626,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             return
 
         buffered_candidate_text = " ".join(self._live_user_transcript.split())
-        if buffered_candidate_text and self._is_self_intro_phase(state):
+        if buffered_candidate_text and is_self_intro_phase(state):
             logger.info(
                 "Skipping buffered speech recovery during self-introduction",
                 extra={
@@ -925,7 +920,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 **(self.bridge.state or {}),
                 "previous_candidate_response": candidate_text,
             }
-            if settings.PREEMPTIVE_GENERATION_ENABLED and not self._is_self_intro_phase(
+            if settings.PREEMPTIVE_GENERATION_ENABLED and not is_self_intro_phase(
                 preview
             ):
                 asyncio.create_task(self._warm_speculative_turn(candidate_text))

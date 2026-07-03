@@ -2,33 +2,14 @@
 
 from __future__ import annotations
 
-import re
-
+from src.control.agents.nodes.classify_response import REPEAT_PATTERN
+from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.nodes.time_manager import decide_time_action
-
-REPEAT_PATTERN = re.compile(
-    r"\b("
-    r"repeat (?:it|that|this question|that question|the question)|"
-    r"can you repeat (?:it|that|the question|this question)|"
-    r"could you repeat (?:it|that|the question|this question)|"
-    r"say (?:it|that) again|hear (?:it|that|this question|the question) again|"
-    r"once more"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _is_self_intro_phase(state: dict) -> bool:
-    return bool(state.get("is_self_introduction")) or (
-        state.get("current_section_kind") == "self_intro"
-    )
 
 
 def _intro_state(**overrides):
     base = {
         "current_section_kind": "self_intro",
-        "is_self_introduction": True,
-        "current_section": "self_intro",
         "current_section_index": 0,
         "current_section_budget_secs": 120,
         "current_section_started_elapsed_secs": 0,
@@ -67,6 +48,5 @@ class TestRepeatPattern:
 
 class TestSelfIntroPhaseHelper:
     def test_detects_self_intro(self) -> None:
-        assert _is_self_intro_phase({"is_self_introduction": True})
-        assert _is_self_intro_phase({"current_section_kind": "self_intro"})
-        assert not _is_self_intro_phase({"current_section_kind": "technical"})
+        assert is_self_intro_phase({"current_section_kind": "self_intro"})
+        assert not is_self_intro_phase({"current_section_kind": "technical"})

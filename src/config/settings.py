@@ -25,14 +25,14 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = Field(default="")
     DEEPGRAM_STT_MODEL: str = Field(default="nova-3")
     DEEPGRAM_TTS_MODEL: str = Field(default="aura-2-andromeda-en")
-    DEEPGRAM_ENDPOINTING_MS: int = Field(default=300)
+    DEEPGRAM_ENDPOINTING_MS: int = Field(default=400)
     VAD_MIN_SPEECH_DURATION_SECS: float = Field(default=0.2)
     VAD_MIN_SILENCE_DURATION_SECS: float = Field(default=0.4)
     VAD_PREFIX_PADDING_DURATION_SECS: float = Field(default=0.15)
     # Endpointing tuned for fast, human-like turn-taking. LiveKit TurnDetector
     # gates semantic EOT; these delays only cap post-semantic silence padding.
-    TURN_ENDPOINTING_MIN_DELAY_SECS: float = Field(default=0.4)
-    TURN_ENDPOINTING_MAX_DELAY_SECS: float = Field(default=1.8)
+    TURN_ENDPOINTING_MIN_DELAY_SECS: float = Field(default=0.5)
+    TURN_ENDPOINTING_MAX_DELAY_SECS: float = Field(default=2.0)
     FALSE_INTERRUPTION_TIMEOUT_SECS: float = Field(default=1.2)
     # Speak an instant, content-neutral acknowledgement while the merged
     # interviewer call runs so the candidate hears a reply with no dead air.
@@ -89,8 +89,6 @@ class Settings(BaseSettings):
     NVIDIA_NIM_REASONING_BUDGET: int = Field(default=16384)
     NVIDIA_NIM_TIMEOUT_SECS: float = Field(default=600.0)
     NVIDIA_NIM_STREAM: bool = Field(default=True)
-    NVIDIA_NIM_TWO_STAGE_QA_THRESHOLD: int = Field(default=12, ge=1)
-    NVIDIA_NIM_TWO_STAGE_INPUT_CHARS: int = Field(default=18000, ge=1000)
 
     # LiveKit real-time communication.
     LIVEKIT_URL: str = Field(default="")

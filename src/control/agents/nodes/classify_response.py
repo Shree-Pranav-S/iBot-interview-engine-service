@@ -1,21 +1,13 @@
-"""Deterministic fast paths and strict LLM response classification."""
+"""Deterministic fast paths for candidate response routing."""
 
 from __future__ import annotations
 
-import json
-import logging
 import re
-import time
 from typing import Any
 
-from src.control.agents.key_routing import active_turn_key_slot
-from src.control.agents.nodes.llm_helpers import classify_with_schema
-from src.control.agents.prompts import CLASSIFICATION_SYSTEM_PROMPT
+from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.state import InterviewState
-from src.schemas.prompts import CandidateResponseClassification
 from src.utils.interview_graph import deterministic_violation_id, utc_now_iso
-
-logger = logging.getLogger(__name__)
 
 REPEAT_PATTERN = re.compile(
     r"\b("
@@ -158,6 +150,29 @@ def _spoken_word_count(text: str) -> int:
     return len(re.findall(r"\b[\w+#.-]+\b", text))
 
 
+def _self_intro_combined_text(state: InterviewState, text: str) -> str:
+    """Merge prior self-intro speech with the current turn for substantiality checks."""
+
+    prior = " ".join(str(state.get("self_intro_accumulated_response") or "").split())
+    current = " ".join(str(text or "").split())
+    if not prior:
+        return current
+    if not current:
+        return prior
+    if current.casefold().startswith(prior.casefold()):
+        return current
+    return f"{prior} {current}".strip()
+
+
+def self_intro_is_substantial(state: InterviewState, text: str) -> bool:
+    """Return True when cumulative self-intro speech meets the elaboration threshold."""
+
+    return (
+        _spoken_word_count(_self_intro_combined_text(state, text))
+        >= SELF_INTRO_ELABORATION_WORD_THRESHOLD
+    )
+
+
 def is_deterministic_classification_source(source: str | None) -> bool:
     """Return True when a turn was classified without the merged interviewer LLM."""
 
@@ -184,7 +199,7 @@ def will_bypass_interviewer_llm(state: InterviewState, text: str) -> bool:
         "clarification",
     ):
         return True
-    if bool(state.get("is_self_introduction")):
+    if is_self_intro_phase(state):
         return True
     word_count = _spoken_word_count(text)
     return (
@@ -239,7 +254,7 @@ def _result(
         question_doubt_response: Optional generated response for doubt cases.
 
     Returns:
-        The dictionary matching CandidateResponseClassification structure.
+        The dictionary matching the interviewer-turn classification structure.
     """
     return {
         "response_type": response_type,
@@ -286,6 +301,15 @@ def _deterministic_classification(
     """
     event = state.get("candidate_event") or {}
     if isinstance(event, dict) and event.get("event_type") == "silence_timeout":
+        if is_self_intro_phase(state) and self_intro_is_substantial(
+            state,
+            "",
+        ):
+            return _result(
+                response_type="answer",
+                clarification_type=None,
+                is_substantial=True,
+            )
         return _result(
             response_type="silence",
             clarification_type=None,
@@ -331,12 +355,11 @@ def _deterministic_classification(
             is_substantial=None,
         )
 
-    if bool(state.get("is_self_introduction")):
-        word_count = _spoken_word_count(text)
+    if is_self_intro_phase(state):
         return _result(
             response_type="answer",
             clarification_type=None,
-            is_substantial=(word_count >= SELF_INTRO_ELABORATION_WORD_THRESHOLD),
+            is_substantial=self_intro_is_substantial(state, text),
         )
     if state.get("current_section_kind") == "behavioural_cultural":
         word_count = _spoken_word_count(text)
@@ -359,50 +382,6 @@ def _deterministic_classification(
             is_substantial=None,
         )
     return None
-
-
-def _classification_messages(state: InterviewState) -> list[dict[str, str]]:
-    """
-    Construct the messages to prompt the LLM to classify the candidate's response.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        A list of chat messages for the LLM.
-    """
-    context = {
-        "previous_candidate_response": state.get("previous_candidate_response") or "",
-        "previous_question": state.get("current_question_text") or "",
-        "is_self_introduction": bool(state.get("is_self_introduction")),
-    }
-    return [
-        {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": json.dumps(context, ensure_ascii=False, default=str),
-        },
-    ]
-
-
-def _safe_fallback(text: str) -> CandidateResponseClassification:
-    """
-    Keep a live interview moving without accepting malformed model JSON.
-    Used if the classification LLM call fails completely.
-
-    Args:
-        text: The raw transcribed text.
-
-    Returns:
-        A default safe classification treating the text as an answer.
-    """
-
-    return CandidateResponseClassification(
-        response_type="answer",
-        clarification_type=None,
-        is_substantial=_spoken_word_count(text) > 2,
-        question_doubt_response=None,
-    )
 
 
 def _resume_has_skill(state: InterviewState) -> bool:
@@ -536,140 +515,3 @@ def _turn_violations(
                     )
                 )
     return violations
-
-
-async def classify_candidate_response(state: InterviewState) -> dict[str, Any]:
-    """
-    Classify candidate speech as an answer, silence, or clarification request.
-
-    Bypasses the LLM for deterministic high-confidence cases. Identifies turn
-    violations, decides if an answer is substantial enough to evaluate, and routes
-    the graph to the appropriate next node.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        A dictionary containing the classification results, detected violations,
-        and the `next_action` routing key.
-    """
-
-    started_at = time.perf_counter()
-    text = str(state.get("previous_candidate_response") or "")
-    classification = _deterministic_classification(state, text)
-    source = "deterministic"
-
-    if classification is None:
-        try:
-            model_result = await classify_with_schema(
-                _classification_messages(state),
-                CandidateResponseClassification,
-                key_slot=active_turn_key_slot(state),
-            )
-        except Exception:
-            logger.exception(
-                "Strict candidate-response classification failed",
-                extra={
-                    "candidate_assessment_id": state.get("candidate_assessment_id"),
-                    "question_id": state.get("current_question_id"),
-                },
-            )
-            model_result = _safe_fallback(text)
-            source = "validated_fallback"
-        else:
-            source = "llm"
-        classification = model_result.model_dump()
-
-    response_type = str(classification["response_type"])
-    is_substantial = classification.get("is_substantial")
-    if response_type == "answer" and bool(state.get("is_self_introduction")):
-        # Self-introduction elaboration is intentionally governed by one metric:
-        # an answer with fewer than 15 spoken words needs more detail.
-        is_substantial = (
-            _spoken_word_count(text) >= SELF_INTRO_ELABORATION_WORD_THRESHOLD
-        )
-        classification["is_substantial"] = is_substantial
-    elif (
-        response_type == "answer"
-        and state.get("current_section_kind") == "behavioural_cultural"
-    ):
-        word_count = _spoken_word_count(text)
-        if word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD:
-            is_substantial = word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD
-            classification["is_substantial"] = is_substantial
-
-    clarification_type = classification.get("clarification_type")
-    resume_skill_match = clarification_type == "skip_question" and _resume_has_skill(
-        state
-    )
-    new_violations = _turn_violations(
-        state,
-        response_type=response_type,
-        clarification_type=(str(clarification_type) if clarification_type else None),
-        resume_skill_match=resume_skill_match,
-    )
-    recent_violations = [
-        *list(state.get("recent_violations") or []),
-        *new_violations,
-    ][-20:]
-
-    pending_candidate_turn = dict(state.get("pending_candidate_turn") or {})
-    metadata = dict(pending_candidate_turn.get("metadata") or {})
-    metadata.update(
-        {
-            "classification": classification,
-            "classification_source": source,
-            "clarification_type": clarification_type,
-            "is_substantial": is_substantial,
-        }
-    )
-    pending_candidate_turn.update(
-        {
-            "response_type": response_type,
-            "metadata": metadata,
-        }
-    )
-
-    silence_stage = state.get("silence_stage") or "none"
-    if response_type != "silence" and classification.get("clarification_type") not in {
-        "time_to_think",
-        "decline_think_time",
-    }:
-        silence_stage = "none"
-
-    logger.info(
-        "Candidate response classified",
-        extra={
-            "candidate_assessment_id": state.get("candidate_assessment_id"),
-            "question_id": state.get("current_question_id"),
-            "response_type": response_type,
-            "is_substantial": is_substantial,
-            "classification_source": source,
-            "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
-        },
-    )
-
-    return {
-        "last_classification": classification,
-        "classification_source": source,
-        "last_response_type": response_type,
-        "last_response_substantial": is_substantial,
-        "last_skip_resume_skill_match": resume_skill_match,
-        "pending_candidate_turn": pending_candidate_turn,
-        "violations_to_persist": new_violations,
-        "recent_violations": recent_violations,
-        "silence_stage": silence_stage,
-        "next_action": (
-            "evaluate_answer"
-            if (
-                response_type == "answer"
-                and is_substantial
-                and state.get("current_section_kind") != "behavioural_cultural"
-            )
-            else (
-                "check_time"
-                if response_type == "answer" and is_substantial
-                else "generate_bot_response"
-            )
-        ),
-    }

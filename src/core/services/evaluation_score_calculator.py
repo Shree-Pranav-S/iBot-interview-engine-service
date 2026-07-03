@@ -10,10 +10,6 @@ from src.core.services.evaluation_context_builder import (
     EvaluationContextBundle,
 )
 from src.core.services.evaluation_llm_client import NvidiaEvaluationResult
-from src.core.services.evaluation_prompt import (
-    HOLISTIC_EVALUATION_MODEL_PROVIDER,
-    HOLISTIC_EVALUATION_PROMPT_VERSION,
-)
 from src.schemas.evaluation_llm import FinalEvaluationRecord
 
 TECHNICAL_WEIGHT = 0.75
@@ -376,9 +372,9 @@ def calculate_final_evaluation(
         recommendation_reasoning=recommendation_reasoning,
         strengths=strengths,
         concerns=concerns,
-        prompt_version=HOLISTIC_EVALUATION_PROMPT_VERSION,
+        prompt_version="nvidia-nemotron-single-stage-v1",
         model_name=settings.NVIDIA_NIM_MODEL,
-        model_provider=HOLISTIC_EVALUATION_MODEL_PROVIDER,
+        model_provider="nvidia_nim",
         evaluation_schema_version=EVALUATION_SCHEMA_VERSION,
         transcript_hash=bundle.evaluation_input.transcript_hash,
         raw_model_output=model_result.raw_output,

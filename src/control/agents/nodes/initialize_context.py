@@ -161,7 +161,6 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         ),
         0,
     )
-    intro_section = runtime_sections[intro_index]
     duration_mins = int(
         interview_plan.get("total_mins") or context.get("interview_duration_mins") or 30
     )
@@ -206,19 +205,15 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         .strip()
         .lower(),
         "runtime_sections": runtime_sections,
-        "current_section": str(intro_section["section_name"]),
         "current_section_index": intro_index,
         "current_section_kind": "self_intro",
         "current_technical_skill": None,
-        "current_expected_signals": [],
         "current_question_id": "phase-1:self-introduction",
         "current_question_text": (
             "Could you tell me about your professional background?"
         ),
         "last_rephrased_question": None,
-        "last_spoken_opening_text": None,
         "current_question_difficulty": None,
-        "is_self_introduction": True,
         "candidate_event": None,
         "previous_candidate_response": "",
         "previous_response_duration_ms": None,
@@ -242,6 +237,7 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "silence_stage": "none",
         "skip_attempts_for_current_question": 0,
         "self_intro_elaboration_requested": False,
+        "self_intro_accumulated_response": "",
         "should_advance_question": False,
         "phase_complete": False,
         "next_action": "deliver_opening",

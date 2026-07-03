@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.control.agents.nodes.question_strategy import (
+    current_section_name,
     format_resume_skills_phrase,
     opening_resume_skills,
 )
@@ -62,7 +63,7 @@ def deliver_opening(state: InterviewState) -> dict[str, Any]:
                 "question_text": question_text,
                 "difficulty": None,
                 "skill": None,
-                "section": state.get("current_section"),
+                "section": current_section_name(state),
                 "topic": "professional background",
             }
         )
@@ -71,7 +72,6 @@ def deliver_opening(state: InterviewState) -> dict[str, Any]:
         "bot_reply_type": "opening",
         "pending_bot_turn": pending_bot_turn,
         "asked_questions": asked_questions,
-        "last_spoken_opening_text": question_text,
         "next_action": "await_candidate_response",
         "timer_started": False,
         "timer_started_at": None,
