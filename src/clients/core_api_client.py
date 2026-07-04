@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import httpx
 
@@ -28,21 +28,25 @@ from src.schemas.livekit import (
 )
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
-_INTERNAL_HEADER = "interview-engine"
+_INTERNAL_HEADERS = {"X-Internal-Service": "interview-engine"}
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 _HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+_STATUS_EXCEPTIONS: dict[int, type[AppException]] = {
+    400: BadRequestException,
+    401: AuthenticationException,
+    403: ForbiddenException,
+    404: NotFoundException,
+    409: ConflictException,
+    500: InternalServerException,
+    502: BadGatewayException,
+}
 _http_client: httpx.AsyncClient | None = None
-
-
-def _create_http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=_TIMEOUT, limits=_HTTP_LIMITS)
 
 
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
-        _http_client = _create_http_client()
+        _http_client = httpx.AsyncClient(timeout=_TIMEOUT, limits=_HTTP_LIMITS)
     return _http_client
 
 
@@ -55,16 +59,7 @@ async def close_core_api_http_client() -> None:
 
 
 def _exception_for_status(status_code: int, message: str) -> AppException:
-    mapping: dict[int, type[AppException]] = {
-        400: BadRequestException,
-        401: AuthenticationException,
-        403: ForbiddenException,
-        404: NotFoundException,
-        409: ConflictException,
-        500: InternalServerException,
-        502: BadGatewayException,
-    }
-    exc_type = mapping.get(status_code, AppException)
+    exc_type = _STATUS_EXCEPTIONS.get(status_code, AppException)
     return exc_type(message, status_code=status_code)
 
 
@@ -76,14 +71,13 @@ class CoreApiClient:
         base_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
+        """Configure an optional base URL and injectable HTTP transport."""
+
         self._base_url = (base_url or settings.CORE_API_URL).rstrip("/")
         self._http_client = http_client
 
     def _client(self) -> httpx.AsyncClient:
         return self._http_client or _get_http_client()
-
-    def _headers(self) -> dict[str, str]:
-        return {"X-Internal-Service": _INTERNAL_HEADER}
 
     async def _request(
         self,
@@ -98,7 +92,7 @@ class CoreApiClient:
             response = await self._client().request(
                 method,
                 url,
-                headers=self._headers(),
+                headers=_INTERNAL_HEADERS,
                 json=json,
                 params=params,
             )
@@ -127,6 +121,8 @@ class CoreApiClient:
         self,
         invitation_token: uuid.UUID,
     ) -> CandidateSessionBootstrapResponse:
+        """Exchange a one-time invitation for candidate session context."""
+
         data = await self._request(
             "POST",
             "/internal/interview/session/enter",
@@ -138,6 +134,8 @@ class CoreApiClient:
         self,
         session_token: str,
     ) -> CandidateSessionBootstrapResponse:
+        """Restore candidate session context from a session token."""
+
         data = await self._request(
             "POST",
             "/internal/interview/session/context",
@@ -149,6 +147,8 @@ class CoreApiClient:
         self,
         session_token: str,
     ) -> CandidateConnectionContext:
+        """Authorize one LiveKit interview connection."""
+
         data = await self._request(
             "POST",
             "/internal/interview/session/authorize-connection",
@@ -157,6 +157,8 @@ class CoreApiClient:
         return CandidateConnectionContext.model_validate(data)
 
     async def authorize_demo(self, session_token: str) -> dict[str, Any]:
+        """Authorize access to a disposable demo room."""
+
         return cast(
             dict[str, Any],
             await self._request(
@@ -175,6 +177,8 @@ class CoreApiClient:
         reason: str,
         elapsed_secs: int,
     ) -> dict[str, Any]:
+        """Persist a candidate connection drop."""
+
         return cast(
             dict[str, Any],
             await self._request(
@@ -191,6 +195,8 @@ class CoreApiClient:
         )
 
     async def create_event_log(self, event: EventLogCreate) -> None:
+        """Persist one durable interview-engine event."""
+
         await self._request(
             "POST",
             "/internal/interview/events",
@@ -201,6 +207,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Load or create the graph's initial context and session."""
+
         data = await self._request(
             "POST",
             "/internal/interview/context/initialize",
@@ -212,6 +220,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> dict[str, Any]:
+        """Load current interview context for a candidate assessment."""
+
         return cast(
             dict[str, Any],
             await self._request(
@@ -224,6 +234,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> dict[str, Any]:
+        """Load the session associated with a candidate assessment."""
+
         return cast(
             dict[str, Any],
             await self._request(
@@ -240,6 +252,8 @@ class CoreApiClient:
         violations: list[dict[str, Any]],
         elapsed_secs: int | None = None,
     ) -> None:
+        """Persist transcript items, violations, and optional elapsed time."""
+
         body: dict[str, Any] = {
             "transcript_items": transcript_items,
             "violations": violations,
@@ -253,6 +267,8 @@ class CoreApiClient:
         )
 
     async def mark_session_in_progress(self, session_id: str) -> None:
+        """Mark a session as actively interviewing."""
+
         await self._request(
             "POST",
             f"/internal/interview/sessions/{session_id}/in-progress",
@@ -264,6 +280,8 @@ class CoreApiClient:
         *,
         total_elapsed_secs: int,
     ) -> None:
+        """Complete a session with its authoritative elapsed time."""
+
         await self._request(
             "POST",
             f"/internal/interview/sessions/{session_id}/complete",
@@ -274,6 +292,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> datetime:
+        """Persist and return the candidate's timer start time."""
+
         data = await self._request(
             "POST",
             f"/internal/interview/candidates/{candidate_assessment_id}/timer-started",
@@ -284,6 +304,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> None:
+        """Mark the candidate assessment as completed."""
+
         await self._request(
             "POST",
             f"/internal/interview/candidates/{candidate_assessment_id}/completed",
@@ -293,6 +315,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> dict[str, Any] | None:
+        """Load all source data required for holistic evaluation."""
+
         return cast(
             dict[str, Any] | None,
             await self._request(
@@ -306,6 +330,8 @@ class CoreApiClient:
         candidate_assessment_id: str | uuid.UUID,
         transcript_hash: str,
     ) -> bool:
+        """Return whether this transcript fingerprint was already evaluated."""
+
         return bool(
             await self._request(
                 "GET",
@@ -321,6 +347,8 @@ class CoreApiClient:
         self,
         candidate_assessment_id: str | uuid.UUID,
     ) -> None:
+        """Persist a terminal holistic-evaluation failure."""
+
         await self._request(
             "POST",
             f"/internal/interview/evaluation/failed/{candidate_assessment_id}",
@@ -332,6 +360,8 @@ class CoreApiClient:
         *,
         recruiter_email: str,
     ) -> dict[str, Any]:
+        """Persist a final evaluation and create its recruiter notification."""
+
         return cast(
             dict[str, Any],
             await self._request(
@@ -345,6 +375,8 @@ class CoreApiClient:
         )
 
     async def health_ping(self) -> bool:
+        """Return whether the core API health endpoint responds successfully."""
+
         try:
             response = await self._client().get(
                 f"{self._base_url}/health",
@@ -359,6 +391,8 @@ _default_client: CoreApiClient | None = None
 
 
 def get_core_api_client() -> CoreApiClient:
+    """Return the process-wide core API client wrapper."""
+
     global _default_client
     if _default_client is None:
         _default_client = CoreApiClient()

@@ -5,7 +5,6 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette import status
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -90,34 +89,6 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             message="Request validation failed.",
             errors=errors,
-        )
-
-    @app.exception_handler(IntegrityError)
-    async def integrity_exception_handler(
-        request: Request,
-        exc: IntegrityError,
-    ) -> JSONResponse:
-        logger.exception(
-            "Database integrity error",
-            extra={"path": request.url.path, "method": request.method},
-        )
-        return _json_error(
-            status_code=status.HTTP_409_CONFLICT,
-            message="A data conflict occurred.",
-        )
-
-    @app.exception_handler(SQLAlchemyError)
-    async def sqlalchemy_exception_handler(
-        request: Request,
-        exc: SQLAlchemyError,
-    ) -> JSONResponse:
-        logger.exception(
-            "Database error",
-            extra={"path": request.url.path, "method": request.method},
-        )
-        return _json_error(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            message="A database error occurred.",
         )
 
     @app.exception_handler(Exception)

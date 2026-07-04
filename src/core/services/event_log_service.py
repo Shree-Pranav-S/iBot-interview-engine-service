@@ -8,15 +8,11 @@ from src.schemas.event_log import EventLogCreate
 logger = logging.getLogger(__name__)
 
 
-async def record_event_in_background(event: EventLogCreate) -> None:
-    await get_core_api_client().create_event_log(event)
-
-
 async def try_record_event_in_background(event: EventLogCreate) -> None:
     """Best-effort logging that never changes the interview or task outcome."""
 
     try:
-        await record_event_in_background(event)
+        await get_core_api_client().create_event_log(event)
     except Exception:
         logger.exception(
             "Failed to persist event log",

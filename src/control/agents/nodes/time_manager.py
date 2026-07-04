@@ -102,7 +102,6 @@ def _timing(state: InterviewState) -> dict[str, int]:
         int(state.get("current_section_started_elapsed_secs") or 0),
     )
     section_elapsed = max(0, elapsed - section_started)
-    future_reserved = remaining_future_budget_secs(state)
     transition_deadline = section_transition_deadline_elapsed(state)
     barge_deadline = section_transition_deadline_elapsed(
         state,
@@ -121,10 +120,7 @@ def _timing(state: InterviewState) -> dict[str, int]:
             nominal_section_remaining,
             scheduled_section_remaining,
         ),
-        "nominal_section_remaining_secs": nominal_section_remaining,
         "section_budget_secs": section_budget,
-        "future_reserved_secs": future_reserved,
-        "section_transition_deadline_secs": transition_deadline,
         "section_barge_deadline_secs": barge_deadline,
     }
 
@@ -141,25 +137,23 @@ def _timing_updates(timing: dict[str, int]) -> dict[str, int]:
     """
     return {
         "elapsed_secs": timing["elapsed_secs"],
-        "remaining_secs": timing["remaining_secs"],
         "current_section_budget_secs": timing["section_budget_secs"],
         "current_section_elapsed_secs": timing["section_elapsed_secs"],
         "current_section_remaining_secs": timing["section_remaining_secs"],
-        "reserved_future_section_secs": timing["future_reserved_secs"],
-        "current_section_transition_deadline_elapsed_secs": timing[
-            "section_transition_deadline_secs"
-        ],
     }
 
 
 def _next_section(
     state: InterviewState,
+    *,
+    section_kind: str | None = None,
 ) -> tuple[int, dict[str, Any]] | None:
     """
     Find the next valid section (technical or behavioural) in the runtime plan.
 
     Args:
         state: The current interview state.
+        section_kind: Optional section type to search for.
 
     Returns:
         A tuple of (section_index, section_dict), or None if no sections remain.
@@ -168,23 +162,10 @@ def _next_section(
     current = int(state.get("current_section_index") or 0)
     for index in range(current + 1, len(sections)):
         section = sections[index]
-        if section.get("section_kind") in {
-            "technical",
-            "behavioural_cultural",
-        }:
-            return index, section
-    return None
-
-
-def _behavioural_rescue_section(
-    state: InterviewState,
-) -> tuple[int, dict[str, Any]] | None:
-    """Return behavioural section when it is still ahead of current index."""
-
-    sections = list(state.get("runtime_sections") or [])
-    current = int(state.get("current_section_index") or 0)
-    for index, section in enumerate(sections):
-        if section.get("section_kind") == "behavioural_cultural" and index > current:
+        kind = section.get("section_kind")
+        if kind in {"technical", "behavioural_cultural"} and (
+            section_kind is None or kind == section_kind
+        ):
             return index, section
     return None
 
@@ -341,7 +322,10 @@ def decide_time_action(state: InterviewState) -> dict[str, Any]:
     if timing["remaining_secs"] <= 0:
         return _close("interview_time_exhausted")
 
-    behavioural_rescue = _behavioural_rescue_section(state)
+    behavioural_rescue = _next_section(
+        state,
+        section_kind="behavioural_cultural",
+    )
     if (
         behavioural_rescue is not None
         and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS
@@ -428,7 +412,10 @@ async def force_section_time_barge_in(
             "barge_in_triggered": True,
         }
 
-    behavioural_rescue = _behavioural_rescue_section(state)
+    behavioural_rescue = _next_section(
+        state,
+        section_kind="behavioural_cultural",
+    )
     if (
         behavioural_rescue is not None
         and timing["remaining_secs"] <= FORCE_BEHAVIOURAL_REMAINING_SECS

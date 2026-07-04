@@ -15,6 +15,8 @@ from src.data.clients.redis_client import close_redis, init_redis
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initialize and close shared service resources."""
+
     await init_redis()
     await init_graph()
 
@@ -27,6 +29,8 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """Build the configured FastAPI application."""
+
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
     register_exception_handlers(app)
     app.include_router(health_router)

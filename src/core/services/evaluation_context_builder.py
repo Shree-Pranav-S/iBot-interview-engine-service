@@ -20,14 +20,18 @@ EVALUATION_SCHEMA_VERSION = "holistic-evaluation-v2"
 
 @dataclass(frozen=True)
 class TechnicalSkillSpec:
+    """Authoritative metadata for one planned technical skill."""
+
     name: str
     priority_score: float
     expected_signals: tuple[str, ...]
-    questions_asked: int
+    questions_asked: int = 0
 
 
 @dataclass(frozen=True)
 class EvaluationContextBundle:
+    """Validated evaluator input paired with authoritative skill metadata."""
+
     evaluation_input: EvaluationInput
     technical_skills: tuple[TechnicalSkillSpec, ...]
 
@@ -58,7 +62,7 @@ def _json_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
-def _skill_key(value: Any) -> str:
+def normalize_skill_key(value: Any) -> str:
     """
     Normalize a skill name into a consistent lowercase string for matching.
 
@@ -106,7 +110,7 @@ def _priority_map(jd_analysis: dict[str, Any]) -> dict[str, float]:
             item.get("skill") or item.get("name") or item.get("title") or ""
         ).strip()
         if name:
-            priorities[_skill_key(name)] = _score(
+            priorities[normalize_skill_key(name)] = _score(
                 item.get("priority_score"),
                 default=1.0,
             )
@@ -127,7 +131,7 @@ def _priority_for_skill(
     Returns:
         The priority score for the skill, defaulting to 1.0 if not found.
     """
-    key = _skill_key(skill)
+    key = normalize_skill_key(skill)
     if key in priorities:
         return priorities[key]
     for candidate, priority in priorities.items():
@@ -139,42 +143,6 @@ def _priority_for_skill(
         ):
             return priority
     return 1.0
-
-
-def _question_counts(transcript: list[dict[str, Any]]) -> dict[str, int]:
-    """
-    Count the number of questions asked per technical skill by analyzing the transcript.
-
-    Args:
-        transcript: The list of transcript turns (messages).
-
-    Returns:
-        A dictionary mapping normalized skill keys to the number of distinct questions asked.
-    """
-    question_ids: dict[str, set[str]] = {}
-    for turn in transcript:
-        if str(turn.get("speaker") or "").casefold() != "bot":
-            continue
-        skill = str(
-            turn.get("current_skill") or turn.get("skill") or turn.get("section") or ""
-        ).strip()
-        metadata = _json_object(turn.get("metadata"))
-        question_type = str(
-            turn.get("question_type") or metadata.get("question_type") or ""
-        ).casefold()
-        # Historical transcripts predate question_type but still carry the
-        # active technical skill. Non-question response types are explicit,
-        # so an empty type with a skill is a legacy scored question.
-        if not skill or question_type not in {"", "new_question"}:
-            continue
-        question_id = str(
-            turn.get("question_id")
-            or metadata.get("question_id")
-            or turn.get("turn_id")
-            or len(question_ids.get(_skill_key(skill), set()))
-        )
-        question_ids.setdefault(_skill_key(skill), set()).add(question_id)
-    return {key: len(values) for key, values in question_ids.items()}
 
 
 def _string_list(value: Any) -> list[str]:
@@ -234,9 +202,7 @@ def _is_scored_question(turn: dict[str, Any]) -> bool:
 
 def _meaningful_answer(text: str, response_type: str) -> bool:
     normalized_type = response_type.casefold()
-    if normalized_type in {"silence", "irrelevant", "refusal"}:
-        return False
-    if normalized_type == "clarification":
+    if normalized_type in {"silence", "irrelevant", "refusal", "clarification"}:
         return False
     return bool(text.strip())
 
@@ -348,7 +314,6 @@ def _technical_skill_specs(
     *,
     jd_analysis: dict[str, Any],
     interview_plan: dict[str, Any],
-    transcript: list[dict[str, Any]],
 ) -> tuple[TechnicalSkillSpec, ...]:
     """
     Construct a definitive list of technical skills to be evaluated.
@@ -356,8 +321,6 @@ def _technical_skill_specs(
     Args:
         jd_analysis: The structured JD analysis dictionary.
         interview_plan: The structured interview plan dictionary.
-        transcript: The list of transcript turns.
-
     Returns:
         A tuple of TechnicalSkillSpec objects representing the skills to evaluate.
 
@@ -365,7 +328,6 @@ def _technical_skill_specs(
         PermanentEvaluationError: If no technical skills could be inferred.
     """
     priorities = _priority_map(jd_analysis)
-    counts = _question_counts(transcript)
     specs: list[TechnicalSkillSpec] = []
     seen: set[str] = set()
 
@@ -376,7 +338,7 @@ def _technical_skill_specs(
         section_name = str(section.get("section_name") or "").casefold()
         if not name or section_name in {"self_intro", "behavioural_cultural"}:
             continue
-        key = _skill_key(name)
+        key = normalize_skill_key(name)
         if not key or key in seen:
             continue
         expected_signals = tuple(
@@ -389,7 +351,6 @@ def _technical_skill_specs(
                 name=name,
                 priority_score=_priority_for_skill(name, priorities),
                 expected_signals=expected_signals,
-                questions_asked=counts.get(key, 0),
             )
         )
         seen.add(key)
@@ -399,7 +360,7 @@ def _technical_skill_specs(
             if not isinstance(item, dict):
                 continue
             name = str(item.get("skill") or item.get("name") or "").strip()
-            key = _skill_key(name)
+            key = normalize_skill_key(name)
             if not name or key in seen:
                 continue
             specs.append(
@@ -407,7 +368,6 @@ def _technical_skill_specs(
                     name=name,
                     priority_score=_priority_for_skill(name, priorities),
                     expected_signals=(),
-                    questions_asked=counts.get(key, 0),
                 )
             )
             seen.add(key)
@@ -422,13 +382,13 @@ def _canonicalize_question_skills(
     qa_pairs: list[QuestionAnswerPair],
     technical_skills: tuple[TechnicalSkillSpec, ...],
 ) -> tuple[list[QuestionAnswerPair], tuple[TechnicalSkillSpec, ...]]:
-    specs_by_key = {_skill_key(item.name): item for item in technical_skills}
+    specs_by_key = {normalize_skill_key(item.name): item for item in technical_skills}
     counts = {item.name: 0 for item in technical_skills}
     canonical_pairs: list[QuestionAnswerPair] = []
 
     for pair in qa_pairs:
         value = pair.model_dump(mode="json")
-        pair_key = _skill_key(pair.skill) if pair.skill else ""
+        pair_key = normalize_skill_key(pair.skill) if pair.skill else ""
         matched = specs_by_key.get(pair_key)
         if matched is None and pair_key:
             for spec_key, spec in specs_by_key.items():
@@ -494,7 +454,7 @@ def build_evaluation_context(
     source: dict[str, Any],
 ) -> EvaluationContextBundle:
     """
-    Validate repository data, extract skills, calculate properties, and build
+    Validate source data, extract skills, calculate properties, and build
     the complete immutable JSON context bundle for evaluation.
 
     Args:
@@ -530,7 +490,6 @@ def build_evaluation_context(
     technical_skills = _technical_skill_specs(
         jd_analysis=jd_analysis,
         interview_plan=interview_plan,
-        transcript=transcript,
     )
     qa_pairs, technical_skills = _canonicalize_question_skills(
         qa_pairs,

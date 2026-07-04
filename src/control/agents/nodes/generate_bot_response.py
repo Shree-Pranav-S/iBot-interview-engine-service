@@ -13,7 +13,7 @@ from src.control.agents.nodes.classify_response import (
     is_deterministic_classification_source,
     self_intro_is_substantial,
 )
-from src.control.agents.nodes.llm_helpers import rephrase_with_schema
+from src.control.agents.nodes.question_diversity import normalize_question_text
 from src.control.agents.nodes.question_strategy import (
     current_section_name,
     is_self_intro_phase,
@@ -22,6 +22,7 @@ from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.prompts import QUESTION_REPHRASE_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
+from src.core.services import llm_service
 from src.schemas.prompts import QuestionRephraseResponse
 
 logger = logging.getLogger(__name__)
@@ -84,10 +85,6 @@ def _continue_with_question(
         "silence_stage": "none",
         "pending_clarification_text": None,
     }
-
-
-def _normalized_question(value: str) -> str:
-    return " ".join(re.findall(r"[a-z0-9+#.]+", value.casefold()))
 
 
 def _fallback_rephrase(
@@ -195,16 +192,18 @@ async def _rephrase_question(
         },
     ]
     try:
-        result = await rephrase_with_schema(
+        result = await llm_service.lightweight(
             messages,
             QuestionRephraseResponse,
             key_slot=active_turn_key_slot(state),
+            max_tokens=128,
+            temperature=0.1,
         )
         rewritten = " ".join(result.question_text.split())
         similarity = SequenceMatcher(
             None,
-            _normalized_question(question),
-            _normalized_question(rewritten),
+            normalize_question_text(question),
+            normalize_question_text(rewritten),
         ).ratio()
         if similarity >= 0.9:
             raise ValueError("rephrased question is too close to original")
@@ -212,8 +211,8 @@ async def _rephrase_question(
         if previous_rephrase:
             previous_similarity = SequenceMatcher(
                 None,
-                _normalized_question(previous_rephrase),
-                _normalized_question(rewritten),
+                normalize_question_text(previous_rephrase),
+                normalize_question_text(rewritten),
             ).ratio()
             if previous_similarity >= 0.88:
                 raise ValueError("rephrased question repeats the previous rewrite")
@@ -255,7 +254,6 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
         state.get("current_question_text")
         or "Could you answer the current interview question?"
     )
-    intro_repeat_text = state.get("last_rephrased_question") or question
 
     if response_type == "silence":
         if is_intro and self_intro_is_substantial(
@@ -331,7 +329,6 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
         if is_intro and self_intro_is_substantial(state, intro_text):
             return _continue_with_question("", "question_transition")
         if not bool(state.get("last_response_substantial")):
-            is_intro = is_self_intro_phase(state)
             return _reply(
                 state,
                 choose_template(
@@ -355,16 +352,11 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
 
     clarification_type = str(classification.get("clarification_type") or "")
     if clarification_type == "repeat_question":
-        repeatable_question = (
-            intro_repeat_text
-            if is_intro
-            else (state.get("last_rephrased_question") or question)
-        )
         return _reply(
             state,
             choose_template(
                 "repeat_question",
-                question=repeatable_question,
+                question=state.get("last_rephrased_question") or question,
             ),
             "question_repeat",
             question_type="clarification_response",

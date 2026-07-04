@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from src.control.agents.nodes.question_strategy import target_section
 from src.control.agents.nodes.turn_utils import build_bot_turn
@@ -137,10 +137,9 @@ def apply_resolved_question(
         f"{state['interview_session_id']}:question:"
         f"{len(state.get('asked_questions') or []) + 1}"
     )
-    next_state: InterviewState = {
-        **state,
+    section_updates: dict[str, Any] = {
         "current_section_index": section_index,
-        "current_section_kind": section_kind,  # type: ignore[typeddict-item]
+        "current_section_kind": section_kind,
         "current_technical_skill": current_skill,
         "current_question_id": question_id,
         "current_question_text": question_text,
@@ -150,11 +149,10 @@ def apply_resolved_question(
         "current_section_started_elapsed_secs": section_started_elapsed,
         "current_section_elapsed_secs": section_elapsed,
         "current_section_remaining_secs": section_remaining,
-        "reserved_future_section_secs": future_reserved,
-        "current_section_transition_deadline_elapsed_secs": section_deadline,
         "section_budgets_secs": section_budgets,
         "self_intro_leftover_redistributed": redistributed_self_intro_leftover,
     }
+    next_state = cast(InterviewState, {**state, **section_updates})
     pending_bot_turn = build_bot_turn(
         next_state,
         text=spoken_text,
@@ -184,30 +182,15 @@ def apply_resolved_question(
         used_topics.setdefault(current_skill.casefold(), []).append(topic)
 
     return {
-        "current_section_index": section_index,
-        "current_section_kind": section_kind,
-        "current_technical_skill": current_skill,
-        "current_question_id": question_id,
-        "current_question_text": question_text,
-        "last_rephrased_question": None,
-        "current_question_difficulty": current_difficulty,
+        **section_updates,
         "probe_deeper": probe_deeper,
         "thread_follow_up_used": thread_follow_up_used,
         "asked_questions": asked_questions,
         "used_topics_by_skill": used_topics,
-        "current_section_budget_secs": section_budget,
-        "current_section_started_elapsed_secs": section_started_elapsed,
-        "current_section_elapsed_secs": section_elapsed,
-        "current_section_remaining_secs": max(0, section_remaining),
-        "reserved_future_section_secs": future_reserved,
-        "current_section_transition_deadline_elapsed_secs": section_deadline,
-        "section_budgets_secs": section_budgets,
-        "self_intro_leftover_redistributed": redistributed_self_intro_leftover,
         "pending_section_index": None,
         "suppress_previous_context_for_next_question": False,
         "transition_reason": None,
         "barge_in_triggered": False,
-        "pregenerated_question": None,
         "pending_clarification_text": None,
         "bot_reply_text": spoken_text,
         "bot_reply_type": "new_question",

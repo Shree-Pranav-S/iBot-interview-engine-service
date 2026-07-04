@@ -95,7 +95,6 @@ def await_candidate_response(state: InterviewState) -> dict[str, Any]:
     return {
         "candidate_event": event,
         "previous_candidate_response": text,
-        "previous_response_duration_ms": duration_ms,
         "speculative_interviewer_result": event.get("speculative_interviewer_result"),
         "llm_key_slot": compute_turn_key_slot(state),
         "pending_candidate_turn": pending_candidate_turn,

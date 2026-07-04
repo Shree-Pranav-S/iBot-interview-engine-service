@@ -1,3 +1,5 @@
+"""Shared asynchronous Redis client lifecycle."""
+
 import logging
 
 from redis.asyncio import Redis, from_url
@@ -9,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 async def get_or_create_client() -> Redis:
+    """Return the process-wide Redis client, creating it lazily."""
+
     global _client
 
     if _client is None:
@@ -26,12 +30,16 @@ async def get_or_create_client() -> Redis:
 
 
 async def init_redis() -> None:
+    """Initialize Redis and verify connectivity."""
+
     client = await get_or_create_client()
     await client.ping()
     logger.info("Redis connection established.")
 
 
 async def ping_redis() -> bool:
+    """Return whether Redis responds to a health-check ping."""
+
     try:
         client = await get_or_create_client()
         return bool(await client.ping())
@@ -41,5 +49,7 @@ async def ping_redis() -> bool:
 
 
 async def close_redis() -> None:
+    """Close the shared Redis connection pool if initialized."""
+
     if _client is not None:
         await _client.aclose()

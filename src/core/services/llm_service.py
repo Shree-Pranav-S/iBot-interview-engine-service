@@ -141,10 +141,8 @@ def _ordered_candidates(
 
     pool = _api_key_pool(purpose)
     start = int(key_slot or 0) % len(pool)
-    ordered = [
-        ((start + offset) % len(pool), pool[(start + offset) % len(pool)])
-        for offset in range(len(pool))
-    ]
+    ordered_indices = [(start + offset) % len(pool) for offset in range(len(pool))]
+    ordered = [(index, pool[index]) for index in ordered_indices]
     now = time.monotonic()
     candidates = [
         (index, key)

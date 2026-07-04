@@ -8,9 +8,9 @@ from typing import Any
 
 from src.control.agents.key_routing import active_turn_key_slot
 from src.control.agents.nodes.apply_question import apply_resolved_question
-from src.control.agents.nodes.llm_helpers import generate_with_schema
 from src.control.agents.nodes.question_diversity import (
     framing_hint,
+    recent_acknowledgements,
     recent_question_stems,
     validate_generated_question,
     validate_unique_question,
@@ -30,6 +30,7 @@ from src.control.agents.templates import (
     choose_template_avoiding,
     template_variants,
 )
+from src.core.services import llm_service
 from src.schemas.prompts import (
     BehaviouralQuestionGenerationResponse,
     TechnicalQuestionGenerationResponse,
@@ -63,24 +64,6 @@ def _fallback_concept_for_skill(state: InterviewState, skill: str) -> str:
         if concept.casefold() not in used_topics:
             return concept
     return _FALLBACK_CONCEPTS[len(asked) % len(_FALLBACK_CONCEPTS)]
-
-
-def _recent_acknowledgements(state: InterviewState) -> list[str]:
-    """
-    Retrieve the most recent transition phrases (acknowledgements) used by the bot
-    to prevent repetitive conversational bridges.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        A list of up to six recent acknowledgement strings.
-    """
-    return [
-        str(item.get("acknowledgement") or "").strip()
-        for item in (state.get("asked_questions") or [])
-        if str(item.get("acknowledgement") or "").strip()
-    ][-6:]
 
 
 def _candidate_evaluation_context(state: InterviewState) -> dict[str, Any] | None:
@@ -149,7 +132,7 @@ def _technical_messages(
         "question_sequence_number": sequence_number,
         "question_framing_hint": framing_hint(seed, sequence_number),
         "recent_question_stems": recent_question_stems(state),
-        "recent_acknowledgements": _recent_acknowledgements(state),
+        "recent_acknowledgements": recent_acknowledgements(state, limit=6),
         "questions_already_asked_for_skill": [
             item.get("question_text") for item in asked
         ],
@@ -204,7 +187,7 @@ def _behavioural_messages(
         "question_sequence_number": sequence_number,
         "question_framing_hint": framing_hint(seed, sequence_number),
         "recent_question_stems": recent_question_stems(state),
-        "recent_acknowledgements": _recent_acknowledgements(state),
+        "recent_acknowledgements": recent_acknowledgements(state, limit=6),
         "questions_already_asked": [item.get("question_text") for item in asked],
         "signals_already_used": [
             item.get("topic") for item in asked if item.get("topic")
@@ -250,9 +233,9 @@ async def _generate_technical(
         probe_deeper=probe_deeper,
     )
     asked = questions_for_skill(state, skill)
-    recent_acknowledgements = _recent_acknowledgements(state)
+    recent_acknowledgement_list = recent_acknowledgements(state, limit=6)
     try:
-        result = await generate_with_schema(
+        result = await llm_service.generate(
             messages,
             TechnicalQuestionGenerationResponse,
             key_slot=active_turn_key_slot(state),
@@ -307,7 +290,7 @@ async def _generate_technical(
     return TechnicalQuestionGenerationResponse(
         acknowledgement=choose_template_avoiding(
             "question_generation_fallback_acknowledgement",
-            recent=recent_acknowledgements,
+            recent=recent_acknowledgement_list,
         ),
         question_text=candidates[fallback_index],
         difficulty=target_difficulty,
@@ -337,9 +320,9 @@ async def _generate_behavioural(
         expected_signals=expected_signals,
     )
     asked = behavioural_questions(state)
-    recent_acknowledgements = _recent_acknowledgements(state)
+    recent_acknowledgement_list = recent_acknowledgements(state, limit=6)
     try:
-        result = await generate_with_schema(
+        result = await llm_service.generate(
             messages,
             BehaviouralQuestionGenerationResponse,
             key_slot=active_turn_key_slot(state),
@@ -377,7 +360,7 @@ async def _generate_behavioural(
         return BehaviouralQuestionGenerationResponse(
             acknowledgement=choose_template_avoiding(
                 "question_generation_fallback_acknowledgement",
-                recent=recent_acknowledgements,
+                recent=recent_acknowledgement_list,
             ),
             question_text=question,
             signal_focus=signal,
@@ -416,123 +399,36 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
             or entering_new_section
         ),
     }
-    # The merged interviewer-turn node may have already produced this question in the
-    # same call that classified and evaluated the answer. When present and valid, it
-    # is applied directly so no second model round trip is needed.
-    pregenerated = state.get("pregenerated_question") or None
     preface = str(state.get("response_preface_text") or "").strip()
-    follow_interesting_thread = False
-    probe_deeper = False
     if section_kind == "technical":
         skill = str(section.get("skill") or section_name)
         current_skill: str | None = skill
-        used_pregenerated = False
-        if pregenerated and str(pregenerated.get("question_text") or "").strip():
-            candidate_question = str(pregenerated["question_text"]).strip()
-            try:
-                topic_candidate = (
-                    str(pregenerated.get("topic") or "").strip()
-                    or f"{skill} fundamentals"
-                )
-                validate_generated_question(
-                    question_text=candidate_question,
-                    topic=topic_candidate,
-                    skill=skill,
-                    asked_questions=questions_for_skill(state, skill),
-                    used_topics=list(
-                        (state.get("used_topics_by_skill") or {}).get(
-                            skill.casefold(),
-                            [],
-                        )
-                    ),
-                    allow_related_probe=bool(pregenerated.get("probe_deeper")),
-                )
-                acknowledgement = (
-                    preface or str(pregenerated.get("acknowledgement") or "").strip()
-                )
-                question_text = candidate_question
-                topic = topic_candidate
-                current_difficulty: Difficulty | None = (
-                    pregenerated.get("difficulty")
-                    or determine_question_difficulty(
-                        state,
-                        skill=skill,
-                        entering_new_section=entering_new_section,
-                    )[0]
-                )
-                probe_deeper = bool(pregenerated.get("probe_deeper"))
-                follow_interesting_thread = bool(
-                    pregenerated.get("follow_interesting_thread")
-                )
-                used_pregenerated = True
-            except ValueError as exc:
-                logger.info(
-                    "Pregenerated technical question rejected; regenerating: %s",
-                    exc,
-                )
-        if not used_pregenerated:
-            difficulty, probe_deeper = determine_question_difficulty(
-                state,
-                skill=skill,
-                entering_new_section=entering_new_section,
-            )
-            generated = await _generate_technical(
-                generation_state,
-                skill=skill,
-                target_difficulty=difficulty,
-                probe_deeper=probe_deeper,
-            )
-            acknowledgement = preface or generated.acknowledgement
-            question_text = generated.question_text
-            topic = generated.topic
-            current_difficulty = difficulty
-            follow_interesting_thread = False
+        difficulty, probe_deeper = determine_question_difficulty(
+            state,
+            skill=skill,
+            entering_new_section=entering_new_section,
+        )
+        generated = await _generate_technical(
+            generation_state,
+            skill=skill,
+            target_difficulty=difficulty,
+            probe_deeper=probe_deeper,
+        )
+        acknowledgement = preface or generated.acknowledgement
+        question_text = generated.question_text
+        topic = generated.topic
+        current_difficulty: Difficulty | None = difficulty
     else:
         current_skill = None
         current_difficulty = None
         probe_deeper = False
-        used_pregenerated = False
-        if pregenerated and str(pregenerated.get("question_text") or "").strip():
-            candidate_question = str(pregenerated["question_text"]).strip()
-            try:
-                topic_candidate = (
-                    str(pregenerated.get("topic") or "").strip() or "behavioural signal"
-                )
-                validate_generated_question(
-                    question_text=candidate_question,
-                    topic=topic_candidate,
-                    skill="",
-                    asked_questions=behavioural_questions(state),
-                    used_topics=[
-                        str(item.get("topic") or "")
-                        for item in behavioural_questions(state)
-                        if item.get("topic")
-                    ],
-                    allow_related_probe=False,
-                )
-                acknowledgement = (
-                    preface or str(pregenerated.get("acknowledgement") or "").strip()
-                )
-                question_text = candidate_question
-                topic = topic_candidate
-                follow_interesting_thread = bool(
-                    pregenerated.get("follow_interesting_thread")
-                )
-                used_pregenerated = True
-            except ValueError as exc:
-                logger.info(
-                    "Pregenerated behavioural question rejected; regenerating: %s",
-                    exc,
-                )
-        if not used_pregenerated:
-            generated_behavioural = await _generate_behavioural(
-                generation_state,
-                expected_signals=expected_signals,
-            )
-            acknowledgement = preface or generated_behavioural.acknowledgement
-            question_text = generated_behavioural.question_text
-            topic = generated_behavioural.signal_focus
-            follow_interesting_thread = False
+        generated_behavioural = await _generate_behavioural(
+            generation_state,
+            expected_signals=expected_signals,
+        )
+        acknowledgement = preface or generated_behavioural.acknowledgement
+        question_text = generated_behavioural.question_text
+        topic = generated_behavioural.signal_focus
 
     return apply_resolved_question(
         state,
@@ -542,5 +438,4 @@ async def generate_next_question(state: InterviewState) -> dict[str, Any]:
         current_skill=current_skill,
         current_difficulty=current_difficulty,
         probe_deeper=probe_deeper,
-        follow_interesting_thread=follow_interesting_thread,
     )

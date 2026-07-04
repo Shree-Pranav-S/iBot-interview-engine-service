@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +24,7 @@ from pydantic import ValidationError
 from src.config.settings import settings
 from src.core.services.evaluation_context_builder import (
     EvaluationContextBundle,
+    normalize_skill_key,
 )
 from src.core.services.evaluation_errors import (
     EvaluationSchemaError,
@@ -45,6 +45,8 @@ _fallback_client: AsyncOpenAI | None = None
 
 @dataclass(frozen=True)
 class NvidiaEvaluationResult:
+    """Validated evaluator output plus the provider's original JSON object."""
+
     output: HolisticEvaluationLLMOutput
     raw_output: dict[str, Any]
 
@@ -60,30 +62,21 @@ def _get_client(use_fallback: bool = False) -> AsyncOpenAI:
         PermanentEvaluationError: If the NVIDIA NIM API key is missing.
     """
     global _client, _fallback_client
-    if use_fallback:
-        api_key = settings.FALLBACK_NVIDIA_NIM_API_KEY.strip()
-        if not api_key:
-            raise PermanentEvaluationError(
-                "FALLBACK_NVIDIA_NIM_API_KEY is required for fallback holistic evaluation"
-            )
-        if _fallback_client is None:
-            _fallback_client = AsyncOpenAI(
-                base_url=settings.NVIDIA_NIM_BASE_URL,
-                api_key=api_key,
-                timeout=settings.NVIDIA_NIM_TIMEOUT_SECS,
-                # Provider failures are retried by Celery with a meaningful delay.
-                # An immediate SDK retry after a five-minute 504 only causes a 429.
-                max_retries=0,
-            )
-        return _fallback_client
-
-    api_key = settings.NVIDIA_NIM_API_KEY.strip()
+    api_key = (
+        settings.FALLBACK_NVIDIA_NIM_API_KEY
+        if use_fallback
+        else settings.NVIDIA_NIM_API_KEY
+    ).strip()
     if not api_key:
-        raise PermanentEvaluationError(
-            "NVIDIA_NIM_API_KEY is required for holistic evaluation"
+        message = (
+            "FALLBACK_NVIDIA_NIM_API_KEY is required for fallback holistic evaluation"
+            if use_fallback
+            else "NVIDIA_NIM_API_KEY is required for holistic evaluation"
         )
-    if _client is None:
-        _client = AsyncOpenAI(
+        raise PermanentEvaluationError(message)
+    client = _fallback_client if use_fallback else _client
+    if client is None:
+        client = AsyncOpenAI(
             base_url=settings.NVIDIA_NIM_BASE_URL,
             api_key=api_key,
             timeout=settings.NVIDIA_NIM_TIMEOUT_SECS,
@@ -91,7 +84,11 @@ def _get_client(use_fallback: bool = False) -> AsyncOpenAI:
             # An immediate SDK retry after a five-minute 504 only causes a 429.
             max_retries=0,
         )
-    return _client
+        if use_fallback:
+            _fallback_client = client
+        else:
+            _client = client
+    return client
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
@@ -174,19 +171,6 @@ def _semantic_errors(
     return errors
 
 
-def _normalized_skill_key(value: Any) -> str:
-    """
-    Normalize a skill name into a consistent lowercase string for reliable matching.
-
-    Args:
-        value: The raw skill name.
-
-    Returns:
-        A normalized string containing only alphanumeric characters and allowed symbols (+, #, .).
-    """
-    return " ".join(re.findall(r"[a-z0-9+#.]+", str(value).casefold()))
-
-
 def _remap_skill_dict(
     value: Any,
     bundle: EvaluationContextBundle,
@@ -204,15 +188,13 @@ def _remap_skill_dict(
     """
     if not isinstance(value, dict):
         return {}
-    by_normalized_key = {
-        _normalized_skill_key(key): item for key, item in value.items()
-    }
+    by_normalized_key = {normalize_skill_key(key): item for key, item in value.items()}
     remapped: dict[str, Any] = {}
     for spec in bundle.technical_skills:
         if spec.name in value:
             remapped[spec.name] = value[spec.name]
             continue
-        matching_value = by_normalized_key.get(_normalized_skill_key(spec.name))
+        matching_value = by_normalized_key.get(normalize_skill_key(spec.name))
         if matching_value is not None:
             remapped[spec.name] = matching_value
     return remapped
@@ -471,7 +453,6 @@ async def _complete(
     *,
     enable_reasoning: bool = True,
     use_fallback: bool = False,
-    force_non_stream: bool = False,
 ) -> str:
     """
     Execute a chat completion call to the NVIDIA NIM LLM.
@@ -495,7 +476,7 @@ async def _complete(
             "reasoning_enabled": enable_reasoning,
             "timeout_secs": settings.NVIDIA_NIM_TIMEOUT_SECS,
             "max_tokens": settings.NVIDIA_NIM_MAX_TOKENS,
-            "stream": settings.NVIDIA_NIM_STREAM and not force_non_stream,
+            "stream": settings.NVIDIA_NIM_STREAM,
             "message_chars": message_chars,
         },
     )
@@ -510,7 +491,7 @@ async def _complete(
         }
         if enable_reasoning:
             extra_body["reasoning_budget"] = settings.NVIDIA_NIM_REASONING_BUDGET
-        if settings.NVIDIA_NIM_STREAM and not force_non_stream:
+        if settings.NVIDIA_NIM_STREAM:
             try:
                 stream_response = await _get_client(
                     use_fallback

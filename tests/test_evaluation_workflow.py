@@ -4,14 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
-from src.config.settings import settings
 from src.core.services.evaluation_context_builder import build_evaluation_context
 from src.core.services.evaluation_llm_client import (
     NvidiaEvaluationResult,
     _base_messages,
-    _requires_two_stage,
     _semantic_errors,
 )
 from src.core.services.evaluation_prompt import HOLISTIC_EVALUATION_SYSTEM_PROMPT
@@ -254,18 +250,12 @@ def test_scorer_uses_question_scores_and_enforces_relevance_cap() -> None:
     assert record.evaluation_schema_version == "holistic-evaluation-v2"
 
 
-def test_scoring_payload_omits_raw_transcript_and_long_threshold_is_configurable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_scoring_payload_omits_raw_transcript() -> None:
     bundle = build_evaluation_context(_source())
     message = str(_base_messages(bundle)[1]["content"])
 
     assert '"qa_pairs":' in message
     assert '"transcript":' not in message
-
-    monkeypatch.setattr(settings, "NVIDIA_NIM_TWO_STAGE_QA_THRESHOLD", 3)
-    monkeypatch.setattr(settings, "NVIDIA_NIM_TWO_STAGE_INPUT_CHARS", 999999)
-    assert _requires_two_stage(bundle) is True
 
 
 def test_semantic_validation_requires_exact_question_coverage() -> None:

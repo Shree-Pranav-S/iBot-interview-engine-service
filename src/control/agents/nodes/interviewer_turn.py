@@ -23,17 +23,16 @@ from src.control.agents.nodes.classify_response import (
     BEHAVIOURAL_ANSWER_WORD_THRESHOLD,
     BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD,
     _deterministic_classification,
-    _resume_has_skill,
     _self_intro_combined_text,
     _spoken_word_count,
     _turn_violations,
     is_deterministic_classification_source,
     self_intro_is_substantial,
 )
-from src.control.agents.nodes.llm_helpers import interviewer_turn_with_schema
 from src.control.agents.nodes.persist_turn import schedule_elapsed_persistence
 from src.control.agents.nodes.question_diversity import (
     framing_hint,
+    recent_acknowledgements,
     recent_question_stems,
     validate_generated_question,
 )
@@ -42,12 +41,14 @@ from src.control.agents.nodes.question_strategy import (
     difficulty_plan,
     is_self_intro_phase,
     questions_for_skill,
+    resume_has_skill,
     section_expected_signals,
 )
 from src.control.agents.nodes.time_manager import decide_time_action
 from src.control.agents.prompts import INTERVIEWER_TURN_SYSTEM_PROMPT
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
+from src.core.services import llm_service
 from src.schemas.prompts import InterviewerTurnResponse
 
 logger = logging.getLogger(__name__)
@@ -80,8 +81,6 @@ def _should_finish_deterministically(det: dict[str, Any] | None) -> bool:
 
 
 def _safe_merged_fallback(
-    state: InterviewState,
-    text: str,
     det: dict[str, Any] | None,
 ) -> InterviewerTurnResponse:
     """Keep the interview on the current question when the merged LLM call fails."""
@@ -134,14 +133,6 @@ def _safe_merged_fallback(
     )
 
 
-def _recent_acknowledgements(state: InterviewState) -> list[str]:
-    return [
-        str(item.get("acknowledgement") or "").strip()
-        for item in (state.get("asked_questions") or [])
-        if str(item.get("acknowledgement") or "").strip()
-    ][-_CONTEXT_HISTORY_LIMIT:]
-
-
 def _resolve_target(
     state: InterviewState,
     decision: dict[str, Any],
@@ -163,6 +154,21 @@ def _resolve_target(
         "signals": section_expected_signals(state),
         "entering_new_section": False,
     }
+
+
+def _difficulty_plan_for_target(
+    state: InterviewState,
+    target: dict[str, Any],
+) -> dict[str, dict[str, Any]] | None:
+    """Return a technical plan for the resolved target, if applicable."""
+
+    if target["kind"] != "technical":
+        return None
+    return difficulty_plan(
+        state,
+        skill=str(target["skill"] or state.get("current_technical_skill") or "skill"),
+        entering_new_section=bool(target["entering_new_section"]),
+    )
 
 
 def _interviewer_messages(
@@ -209,7 +215,10 @@ def _interviewer_messages(
         "question_sequence_number": sequence_number,
         "question_framing_hint": framing_hint(seed, sequence_number),
         "recent_question_stems": recent_question_stems(state),
-        "recent_acknowledgements": _recent_acknowledgements(state),
+        "recent_acknowledgements": recent_acknowledgements(
+            state,
+            limit=_CONTEXT_HISTORY_LIMIT,
+        ),
         "filler_already_spoken": bool(settings.ENABLE_ACK_FILLER),
     }
 
@@ -259,29 +268,32 @@ def _interviewer_messages(
     ]
 
 
-def _finish_deterministic(
+def _classification_updates(
     state: InterviewState,
-    det: dict[str, Any],
-    started_at: float,
+    *,
+    response_type: str,
+    clarification_type: str | None,
+    is_substantial: bool | None,
+    source: str,
+    question_doubt_response: str | None = None,
+    latest_evaluation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Handle a trusted silence/clarification entirely from templates (no LLM)."""
+    """Build shared classification, violation, and candidate-turn updates."""
 
-    response_type = str(det["response_type"])
-    clarification_type = det.get("clarification_type")
-    is_substantial = det.get("is_substantial")
     classification = {
         "response_type": response_type,
         "clarification_type": clarification_type,
         "is_substantial": is_substantial,
-        "question_doubt_response": None,
+        "question_doubt_response": question_doubt_response,
     }
-    resume_skill_match = clarification_type == "skip_question" and _resume_has_skill(
-        state
+    resume_skill_match = clarification_type == "skip_question" and resume_has_skill(
+        state,
+        state.get("current_technical_skill"),
     )
     new_violations = _turn_violations(
         state,
         response_type=response_type,
-        clarification_type=(str(clarification_type) if clarification_type else None),
+        clarification_type=clarification_type,
         resume_skill_match=resume_skill_match,
     )
     recent_violations = [
@@ -294,13 +306,54 @@ def _finish_deterministic(
     metadata.update(
         {
             "classification": classification,
-            "classification_source": "deterministic",
+            "classification_source": source,
             "clarification_type": clarification_type,
             "is_substantial": is_substantial,
         }
     )
+    if latest_evaluation is not None:
+        metadata.update(
+            {
+                "live_evaluation": latest_evaluation,
+                "evaluation_source": source,
+            }
+        )
     pending_candidate_turn.update(
-        {"response_type": response_type, "metadata": metadata}
+        {
+            "response_type": response_type,
+            "metadata": metadata,
+        }
+    )
+    return {
+        "last_classification": classification,
+        "classification_source": source,
+        "last_response_type": response_type,
+        "last_response_substantial": is_substantial,
+        "last_skip_resume_skill_match": resume_skill_match,
+        "latest_evaluation": latest_evaluation,
+        "pending_candidate_turn": pending_candidate_turn,
+        "violations_to_persist": new_violations,
+        "recent_violations": recent_violations,
+    }
+
+
+def _finish_deterministic(
+    state: InterviewState,
+    det: dict[str, Any],
+    started_at: float,
+) -> dict[str, Any]:
+    """Handle a trusted silence/clarification entirely from templates (no LLM)."""
+
+    response_type = str(det["response_type"])
+    clarification_value = det.get("clarification_type")
+    clarification_type = str(clarification_value) if clarification_value else None
+    is_substantial = det.get("is_substantial")
+    common_updates = _classification_updates(
+        state,
+        response_type=response_type,
+        clarification_type=clarification_type,
+        is_substantial=is_substantial,
+        source="deterministic",
     )
 
     silence_stage = state.get("silence_stage") or "none"
@@ -320,16 +373,7 @@ def _finish_deterministic(
         },
     )
     return {
-        "last_classification": classification,
-        "classification_source": "deterministic",
-        "last_response_type": response_type,
-        "last_response_substantial": is_substantial,
-        "last_skip_resume_skill_match": resume_skill_match,
-        "latest_evaluation": None,
-        "pending_candidate_turn": pending_candidate_turn,
-        "violations_to_persist": new_violations,
-        "recent_violations": recent_violations,
-        "pregenerated_question": None,
+        **common_updates,
         "pregenerated_closing_lead": None,
         "pending_clarification_text": None,
         "silence_stage": silence_stage,
@@ -365,30 +409,6 @@ def _apply_result(
         if word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD:
             is_substantial = word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD
 
-    classification = {
-        "response_type": response_type,
-        "clarification_type": clarification_type,
-        "is_substantial": is_substantial,
-        "question_doubt_response": (
-            result.clarification_response
-            if clarification_type == "question_doubt"
-            else None
-        ),
-    }
-    resume_skill_match = clarification_type == "skip_question" and _resume_has_skill(
-        state
-    )
-    new_violations = _turn_violations(
-        state,
-        response_type=response_type,
-        clarification_type=(str(clarification_type) if clarification_type else None),
-        resume_skill_match=resume_skill_match,
-    )
-    recent_violations = [
-        *list(state.get("recent_violations") or []),
-        *new_violations,
-    ][-20:]
-
     latest_evaluation: dict[str, Any] | None = None
     skill_streaks = {
         key: dict(value)
@@ -414,36 +434,21 @@ def _apply_result(
                 )
             skill_streaks[key] = current
 
-    pending_candidate_turn = dict(state.get("pending_candidate_turn") or {})
-    metadata = dict(pending_candidate_turn.get("metadata") or {})
-    metadata.update(
-        {
-            "classification": classification,
-            "classification_source": source,
-            "clarification_type": clarification_type,
-            "is_substantial": is_substantial,
-        }
-    )
-    if latest_evaluation is not None:
-        metadata.update(
-            {"live_evaluation": latest_evaluation, "evaluation_source": source}
-        )
-    pending_candidate_turn.update(
-        {"response_type": response_type, "metadata": metadata}
-    )
-
     base: dict[str, Any] = {
-        "last_classification": classification,
-        "classification_source": source,
-        "last_response_type": response_type,
-        "last_response_substantial": is_substantial,
-        "last_skip_resume_skill_match": resume_skill_match,
-        "latest_evaluation": latest_evaluation,
+        **_classification_updates(
+            state,
+            response_type=response_type,
+            clarification_type=clarification_type,
+            is_substantial=is_substantial,
+            source=source,
+            question_doubt_response=(
+                result.clarification_response
+                if clarification_type == "question_doubt"
+                else None
+            ),
+            latest_evaluation=latest_evaluation,
+        ),
         "skill_evaluation_streaks": skill_streaks,
-        "pending_candidate_turn": pending_candidate_turn,
-        "violations_to_persist": new_violations,
-        "recent_violations": recent_violations,
-        "pregenerated_question": None,
         "pregenerated_closing_lead": None,
         "pending_clarification_text": None,
         "speculative_interviewer_result": None,
@@ -503,7 +508,7 @@ def _apply_result(
             }
 
         question_text = str(result.question_text or "").strip()
-        pregen: dict[str, Any] | None = None
+        resolved_question: dict[str, Any] | None = None
         if question_text:
             acknowledgement = str(result.acknowledgement or "").strip()
             if forced_behavioural_preface:
@@ -523,7 +528,7 @@ def _apply_result(
                     "follow_interesting_thread": False,
                 }
                 follow_thread = bool(chosen.get("follow_interesting_thread"))
-                pregen = {
+                resolved_question = {
                     "section_kind": "technical",
                     "skill": target["skill"],
                     "question_text": question_text,
@@ -537,7 +542,7 @@ def _apply_result(
                 try:
                     validate_generated_question(
                         question_text=question_text,
-                        topic=str(pregen["topic"]),
+                        topic=str(resolved_question["topic"]),
                         skill=skill_name,
                         asked_questions=questions_for_skill(state, skill_name),
                         used_topics=list(
@@ -546,16 +551,17 @@ def _apply_result(
                                 [],
                             )
                         ),
-                        allow_related_probe=bool(pregen["probe_deeper"]),
+                        allow_related_probe=bool(resolved_question["probe_deeper"]),
                     )
                 except ValueError as exc:
                     logger.info(
                         "Pregenerated technical question rejected: %s",
                         exc,
                     )
-                    pregen = None
+                    resolved_question = None
             else:
-                pregen = {
+                asked_behavioural = behavioural_questions(state)
+                resolved_question = {
                     "section_kind": "behavioural_cultural",
                     "skill": None,
                     "question_text": question_text,
@@ -567,12 +573,12 @@ def _apply_result(
                 try:
                     validate_generated_question(
                         question_text=question_text,
-                        topic=str(pregen["topic"]),
+                        topic=str(resolved_question["topic"]),
                         skill="",
-                        asked_questions=behavioural_questions(state),
+                        asked_questions=asked_behavioural,
                         used_topics=[
                             str(item.get("topic") or "")
-                            for item in behavioural_questions(state)
+                            for item in asked_behavioural
                             if item.get("topic")
                         ],
                         allow_related_probe=False,
@@ -582,9 +588,9 @@ def _apply_result(
                         "Pregenerated behavioural question rejected: %s",
                         exc,
                     )
-                    pregen = None
+                    resolved_question = None
 
-        if pregen:
+        if resolved_question:
             merged_state: InterviewState = {
                 **state,
                 **decision["timing_updates"],
@@ -596,17 +602,21 @@ def _apply_result(
             }
             applied = apply_resolved_question(
                 merged_state,
-                acknowledgement=str(pregen.get("acknowledgement") or "").strip(),
-                question_text=str(pregen["question_text"]).strip(),
-                topic=str(pregen.get("topic") or "").strip(),
+                acknowledgement=str(
+                    resolved_question.get("acknowledgement") or ""
+                ).strip(),
+                question_text=str(resolved_question["question_text"]).strip(),
+                topic=str(resolved_question.get("topic") or "").strip(),
                 current_skill=(
-                    str(pregen.get("skill") or "") or None
+                    str(resolved_question.get("skill") or "") or None
                     if target["kind"] == "technical"
                     else None
                 ),
-                current_difficulty=pregen.get("difficulty"),
-                probe_deeper=bool(pregen.get("probe_deeper")),
-                follow_interesting_thread=bool(pregen.get("follow_interesting_thread")),
+                current_difficulty=resolved_question.get("difficulty"),
+                probe_deeper=bool(resolved_question.get("probe_deeper")),
+                follow_interesting_thread=bool(
+                    resolved_question.get("follow_interesting_thread")
+                ),
             )
             return {
                 **base,
@@ -621,7 +631,6 @@ def _apply_result(
         return {
             **base,
             **decision["timing_updates"],
-            "pregenerated_question": pregen,
             "pending_section_index": decision["pending_section_index"],
             "suppress_previous_context_for_next_question": decision[
                 "suppress_previous_context_for_next_question"
@@ -697,17 +706,7 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
         )
         decision = decide_time_action(state)
         target = _resolve_target(state, decision)
-        plan = (
-            difficulty_plan(
-                state,
-                skill=str(
-                    target["skill"] or state.get("current_technical_skill") or "skill"
-                ),
-                entering_new_section=bool(target["entering_new_section"]),
-            )
-            if target["kind"] == "technical"
-            else None
-        )
+        plan = _difficulty_plan_for_target(state, target)
         return _apply_result(
             state,
             deterministic_result,
@@ -718,11 +717,11 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
             started_at,
         )
 
+    word_count = _spoken_word_count(text)
     if (
         state.get("current_section_kind") == "behavioural_cultural"
-        and _spoken_word_count(text) > BEHAVIOURAL_ANSWER_WORD_THRESHOLD
+        and word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD
     ):
-        word_count = _spoken_word_count(text)
         deterministic_result = InterviewerTurnResponse(
             response_type="answer",
             clarification_type=None,
@@ -749,17 +748,7 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
     target = _resolve_target(state, decision)
     must_close = decision["action"] == "close"
     ask_next_question = not must_close
-    plan = (
-        difficulty_plan(
-            state,
-            skill=str(
-                target["skill"] or state.get("current_technical_skill") or "skill"
-            ),
-            entering_new_section=bool(target["entering_new_section"]),
-        )
-        if target["kind"] == "technical"
-        else None
-    )
+    plan = _difficulty_plan_for_target(state, target)
 
     cached_raw = state.get("speculative_interviewer_result")
     if cached_raw:
@@ -794,7 +783,7 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
 
     source = "llm"
     try:
-        result = await interviewer_turn_with_schema(
+        result = await llm_service.respond(
             messages,
             InterviewerTurnResponse,
             key_slot=active_turn_key_slot(state),
@@ -807,9 +796,8 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
                 "question_id": state.get("current_question_id"),
             },
         )
-        # Treat the utterance as a substantial answer with neutral strength and let
-        # the question generator regenerate, mirroring the legacy fallback path.
-        result = _safe_merged_fallback(state, text, det)
+        # Keep the interview on the current question when the model is unavailable.
+        result = _safe_merged_fallback(det)
         source = "safe_fallback"
 
     return _apply_result(

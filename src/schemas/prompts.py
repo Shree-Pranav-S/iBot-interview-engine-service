@@ -45,6 +45,8 @@ class InterviewerTurnResponse(StrictPromptModel):
 
     @model_validator(mode="after")
     def validate_interviewer_turn(self) -> InterviewerTurnResponse:
+        """Validate response-type-specific fields and spoken-text limits."""
+
         if self.acknowledgement:
             lowered = self.acknowledgement.casefold()
             if any(phrase in lowered for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
@@ -108,6 +110,8 @@ class QuestionRephraseResponse(StrictPromptModel):
 
     @model_validator(mode="after")
     def validate_rephrased_question(self) -> QuestionRephraseResponse:
+        """Require a concise interrogative rewrite."""
+
         if "?" not in self.question_text:
             raise ValueError("question_text must contain at least one question")
         if _spoken_word_count(self.question_text) > 60:
@@ -128,6 +132,8 @@ class TechnicalQuestionGenerationResponse(StrictPromptModel):
     def validate_technical_question(
         self,
     ) -> TechnicalQuestionGenerationResponse:
+        """Validate neutral acknowledgement and technical question shape."""
+
         acknowledgement = self.acknowledgement.casefold()
         if any(phrase in acknowledgement for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
             raise ValueError("interviewer response contains evaluative feedback")
@@ -153,6 +159,8 @@ class BehaviouralQuestionGenerationResponse(StrictPromptModel):
     def validate_behavioural_question(
         self,
     ) -> BehaviouralQuestionGenerationResponse:
+        """Validate neutral acknowledgement and behavioural question shape."""
+
         acknowledgement = self.acknowledgement.casefold()
         if any(phrase in acknowledgement for phrase in FORBIDDEN_INTERVIEWER_FEEDBACK):
             raise ValueError("interviewer response contains evaluative feedback")

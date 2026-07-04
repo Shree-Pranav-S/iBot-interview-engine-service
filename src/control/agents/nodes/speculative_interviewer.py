@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any, cast
 
 from src.control.agents.key_routing import compute_turn_key_slot
 from src.control.agents.nodes.classify_response import _deterministic_classification
 from src.control.agents.nodes.interviewer_turn import (
+    _difficulty_plan_for_target,
     _interviewer_messages,
     _resolve_target,
     _should_finish_deterministically,
 )
-from src.control.agents.nodes.llm_helpers import interviewer_turn_with_schema
 from src.control.agents.nodes.question_diversity import normalize_turn_text
-from src.control.agents.nodes.question_strategy import difficulty_plan
 from src.control.agents.nodes.time_manager import decide_time_action
 from src.control.agents.state import InterviewState
+from src.core.services import llm_service
 from src.schemas.prompts import InterviewerTurnResponse
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,6 @@ class SpeculativeCacheEntry:
 
     normalized_text: str
     result: dict[str, Any]
-    created_at: float
     state_version: str
 
 
@@ -74,17 +72,7 @@ async def warm_speculative_interviewer_turn(
     target = _resolve_target(warm_state, decision)
     must_close = decision["action"] == "close"
     ask_next_question = not must_close
-    plan = (
-        difficulty_plan(
-            warm_state,
-            skill=str(
-                target["skill"] or warm_state.get("current_technical_skill") or "skill"
-            ),
-            entering_new_section=bool(target["entering_new_section"]),
-        )
-        if target["kind"] == "technical"
-        else None
-    )
+    plan = _difficulty_plan_for_target(warm_state, target)
     messages = _interviewer_messages(
         warm_state,
         target=target,
@@ -95,7 +83,7 @@ async def warm_speculative_interviewer_turn(
     )
 
     try:
-        result = await interviewer_turn_with_schema(
+        result = await llm_service.respond(
             messages,
             InterviewerTurnResponse,
             key_slot=compute_turn_key_slot(state),
@@ -113,7 +101,6 @@ async def warm_speculative_interviewer_turn(
     return SpeculativeCacheEntry(
         normalized_text=normalized,
         result=result.model_dump(),
-        created_at=time.monotonic(),
         state_version=_state_version(state),
     )
 

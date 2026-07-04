@@ -44,6 +44,8 @@ async def enter_candidate_session(
     payload: CandidateSessionEntryRequest,
     service: CandidateSessionService = Depends(get_candidate_session_service),
 ) -> APIResponse[CandidateSessionBootstrapResponse]:
+    """Exchange an invitation for durable candidate session context."""
+
     session = await service.enter_with_invitation(payload.invitation_token)
     return APIResponse(
         message=(
@@ -68,6 +70,8 @@ async def get_candidate_session_context(
     payload: CandidateSessionContextRequest,
     service: CandidateSessionService = Depends(get_candidate_session_service),
 ) -> APIResponse[CandidateSessionBootstrapResponse]:
+    """Restore candidate session context from a browser session token."""
+
     session = await service.get_session_context(payload.session_token)
     return APIResponse(
         message="Interview session restored successfully.",

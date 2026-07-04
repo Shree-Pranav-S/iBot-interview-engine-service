@@ -11,10 +11,14 @@ from pydantic import BaseModel, Field
 
 
 class RecruiterEventType(StrEnum):
+    """Recruiter dashboard event types published by this service."""
+
     INTERVIEW_EVALUATED = "INTERVIEW_EVALUATED"
 
 
 class RecruiterRealtimeEvent(BaseModel):
+    """Redis payload delivered to a recruiter's dashboard channel."""
+
     event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     event_type: RecruiterEventType
     occurred_at: datetime

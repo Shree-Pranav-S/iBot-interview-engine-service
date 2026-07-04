@@ -35,19 +35,6 @@ _checkpointer_context: Any | None = None
 _checkpointer: Any | None = None
 
 
-def _checkpoint_uri(database_url: str) -> str:
-    """
-    Format the SQLAlchemy connection string for the AsyncPostgresSaver.
-
-    Args:
-        database_url: The raw database connection string.
-
-    Returns:
-        The formatted URI.
-    """
-    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-
 def _route_after_await(state: InterviewState) -> str:
     """Route to barge-in handler if timed out, otherwise to the merged turn node."""
     if state.get("next_action") == "force_section_time_barge_in":
@@ -189,7 +176,7 @@ async def init_graph(database_url: str | None = None) -> Any:
         return _graph
 
     _checkpointer_context = AsyncPostgresSaver.from_conn_string(
-        _checkpoint_uri(database_url or settings.DATABASE_URL)
+        database_url or settings.DATABASE_URL
     )
     _checkpointer = await _checkpointer_context.__aenter__()
     await _checkpointer.setup()

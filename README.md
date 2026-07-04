@@ -6,17 +6,16 @@ interview workflow, and asynchronous holistic evaluation.
 ## Architecture
 
 - `src/api`: FastAPI routes and middleware.
-- `src/core/services`: orchestration and business rules; no database sessions.
-- `src/data/repositories`: session-injected repositories and the transactional
-  `InterviewUnitOfWork`.
-- `src/data/models/postgres`: SQLAlchemy mappings used by this service.
+- `src/clients`: pooled HTTP access to the core API's internal interview routes.
+- `src/core/services`: session, LiveKit, graph-bridge, and evaluation orchestration.
+- `src/data/clients`: Redis and Celery client lifecycle.
 - `src/control/agents`: LiveKit and LangGraph runtime.
 - `src/handlers`: Celery entrypoints.
 - `src/schemas`: request, response, graph, and LLM contracts.
-- `src/observability`: logging setup.
 
-The core API owns shared PostgreSQL schema migrations. This service maps the
-shared candidate and assessment tables, but does not duplicate their migrations.
+The core API owns application persistence and schema migrations. The interview
+engine reaches it through internal HTTP routes; PostgreSQL access here is limited
+to LangGraph checkpoints.
 
 ## Development checks
 
@@ -25,5 +24,5 @@ uv sync --group dev
 uv run ruff format --check src tests
 uv run ruff check src tests
 uv run mypy src
-uv run python -m unittest discover -s tests -v
+uv run pytest
 ```

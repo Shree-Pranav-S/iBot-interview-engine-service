@@ -100,15 +100,21 @@ class InternalPipelineLLM(llm.LLM):  # type: ignore[misc]
     """Required LiveKit adapter for agents with custom response nodes."""
 
     def __init__(self, model_name: str) -> None:
+        """Initialize the non-provider adapter with a diagnostic model name."""
+
         super().__init__()
         self._model_name = model_name
 
     @property
     def model(self) -> str:
+        """Return the diagnostic model name."""
+
         return self._model_name
 
     @property
     def provider(self) -> str:
+        """Return the internal provider label."""
+
         return "internal"
 
     def chat(
@@ -127,6 +133,14 @@ class InternalPipelineLLM(llm.LLM):  # type: ignore[misc]
         Raises:
             RuntimeError: Always, because the agent implements ``llm_node``.
         """
+        del (
+            chat_ctx,
+            tools,
+            conn_options,
+            parallel_tool_calls,
+            tool_choice,
+            extra_kwargs,
+        )
         raise RuntimeError("This agent only supports its custom response node")
 
 
@@ -134,6 +148,8 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
     """Disposable practice agent driven only by static response templates."""
 
     def __init__(self) -> None:
+        """Initialize static demo response state."""
+
         super().__init__(
             instructions="Static no-LLM demo interview agent.",
             llm=InternalPipelineLLM("static-demo-templates"),
@@ -170,6 +186,7 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
         Raises:
             StopResponse: If the text is empty.
         """
+        del turn_ctx
 
         candidate_text = " ".join((new_message.text_content or "").split())
         if not candidate_text:
@@ -210,6 +227,7 @@ class DemoLiveKitAgent(Agent):  # type: ignore[misc]
         Yields:
             String chunks for the TTS engine.
         """
+        del chat_ctx, tools, model_settings
 
         if not self._response_pending:
             return
@@ -228,6 +246,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         interview_session_id: str,
         connection_id: str,
     ) -> None:
+        """Initialize graph, timing, transcript, and playout state."""
+
         super().__init__(
             instructions="Conduct the interview through the LangGraph workflow.",
             llm=InternalPipelineLLM("langgraph-interview"),
@@ -249,7 +269,6 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._last_agent_speech_finished_at: float | None = None
         self._pending_silence_task: asyncio.Task[None] | None = None
         self._awaiting_agent_reply = False
-        self._timer_start_task: asyncio.Task[None] | None = None
         self._timer_start_requested = False
         self._pending_section_barge_task: asyncio.Task[None] | None = None
         self._barge_in_active = False
@@ -397,6 +416,27 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         await handle.wait_for_playout()
         self._mark_agent_speech_finished()
 
+    async def _say_graph_reply(
+        self,
+        text: str,
+        *,
+        is_closing: bool,
+        allow_interruptions: bool | None = None,
+    ) -> None:
+        """Speak a graph reply and finalize the session after a closing."""
+
+        if not text:
+            return
+        await self._say_text(
+            text,
+            allow_interruptions=(
+                not is_closing if allow_interruptions is None else allow_interruptions
+            ),
+            add_to_chat_ctx=True,
+        )
+        if is_closing:
+            await self._finalize_after_closing()
+
     def track_agent_state(self, new_state: str) -> None:
         """
         Track agent speech so user-away silence and timers start after bot audio ends.
@@ -418,9 +458,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 ) in {"opening", ""}
                 if is_opening_turn:
                     self._timer_start_requested = True
-                    self._timer_start_task = asyncio.create_task(
-                        self._start_timer_after_first_speech()
-                    )
+                    asyncio.create_task(self._start_timer_after_first_speech())
             return
 
         if self._agent_is_speaking:
@@ -460,13 +498,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
             return
 
-        await self._say_text(
+        await self._say_graph_reply(
             opening_text,
-            allow_interruptions=not self._interview_closed,
-            add_to_chat_ctx=True,
+            is_closing=self._interview_closed,
         )
-        if self._interview_closed:
-            await self._finalize_after_closing()
 
     def track_user_state(self, new_state: str) -> None:
         """
@@ -577,6 +612,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         Raises:
             StopResponse: If the turn is discarded or the interview is closed.
         """
+        del turn_ctx
 
         if self._interview_closed:
             raise StopResponse()
@@ -685,15 +721,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 finally:
                     self._awaiting_agent_reply = False
 
-            if not reply_text:
-                return
-            await self._say_text(
+            await self._say_graph_reply(
                 reply_text,
-                allow_interruptions=not is_closing_reply,
-                add_to_chat_ctx=True,
+                is_closing=is_closing_reply,
             )
-            if is_closing_reply:
-                await self._finalize_after_closing()
             return
 
         if self._last_user_turn_finished_at is not None:
@@ -713,16 +744,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             reply_text = await self.bridge.submit_silence()
             is_closing_reply = self._mark_closed_from_state()
 
-        if not reply_text:
-            return
-
-        await self._say_text(
+        await self._say_graph_reply(
             reply_text,
-            allow_interruptions=not is_closing_reply,
-            add_to_chat_ctx=True,
+            is_closing=is_closing_reply,
         )
-        if is_closing_reply:
-            await self._finalize_after_closing()
 
     async def handle_session_close(self, reason: str) -> None:
         """
@@ -781,16 +806,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 self._clear_live_user_transcript()
                 is_closing_reply = self._mark_closed_from_state()
 
-            if not reply_text:
-                return
-
-            await self._say_text(
+            await self._say_graph_reply(
                 reply_text,
+                is_closing=is_closing_reply,
                 allow_interruptions=False,
-                add_to_chat_ctx=True,
             )
-            if is_closing_reply:
-                await self._finalize_after_closing()
         except Exception:
             logger.exception(
                 "Section time barge-in failed",
@@ -897,6 +917,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         Yields:
             Text chunks for the TTS engine.
         """
+        del tools, model_settings
 
         candidate_text = self._pending_user_text
         duration_ms = self._pending_duration_ms

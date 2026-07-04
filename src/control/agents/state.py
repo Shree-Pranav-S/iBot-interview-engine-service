@@ -5,14 +5,6 @@ from __future__ import annotations
 from typing import Any, Literal, TypedDict
 
 ResponseType = Literal["answer", "clarification", "irrelevant", "silence"]
-ClarificationType = Literal[
-    "repeat_question",
-    "rephrase_question",
-    "skip_question",
-    "question_doubt",
-    "time_to_think",
-    "decline_think_time",
-]
 Difficulty = Literal["easy", "medium", "hard"]
 SilenceStage = Literal[
     "none",
@@ -50,7 +42,6 @@ class InterviewState(TypedDict, total=False):
     # LiveKit input for the current turn.
     candidate_event: dict[str, Any] | str | None
     previous_candidate_response: str
-    previous_response_duration_ms: int | None
     speculative_interviewer_result: dict[str, Any] | None
     # Stable key-pool affinity captured before this candidate turn is processed.
     # It survives candidate persistence so regeneration/rephrasing stays on the
@@ -63,7 +54,6 @@ class InterviewState(TypedDict, total=False):
     last_response_type: ResponseType | None
     last_response_substantial: bool | None
     latest_evaluation: dict[str, Any] | None
-    evaluation_source: str | None
 
     # Question history and deterministic adaptation.
     asked_questions: list[dict[str, Any]]
@@ -78,11 +68,7 @@ class InterviewState(TypedDict, total=False):
     bot_reply_text: str
     bot_reply_type: str
     response_preface_text: str | None
-    # Merged interviewer-turn handoff. When the single classify/evaluate/generate
-    # call produces a next question, it is staged here for generate_next_question to
-    # apply without a second LLM call. Clarification text (doubt/rephrase) produced
-    # by the same call is staged for generate_bot_response.
-    pregenerated_question: dict[str, Any] | None
+    # Merged interviewer-turn clarification and closing handoff.
     pregenerated_closing_lead: str | None
     pending_clarification_text: str | None
     silence_stage: SilenceStage
@@ -103,14 +89,11 @@ class InterviewState(TypedDict, total=False):
     # Total and section timing.
     total_duration_secs: int
     elapsed_secs: int
-    remaining_secs: int
     section_budgets_secs: dict[str, int]
     current_section_budget_secs: int
     current_section_started_elapsed_secs: int
     current_section_elapsed_secs: int
     current_section_remaining_secs: int
-    reserved_future_section_secs: int
-    current_section_transition_deadline_elapsed_secs: int
     pending_section_index: int | None
     suppress_previous_context_for_next_question: bool
     transition_reason: str | None

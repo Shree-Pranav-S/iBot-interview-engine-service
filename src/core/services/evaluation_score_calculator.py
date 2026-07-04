@@ -10,7 +10,7 @@ from src.core.services.evaluation_context_builder import (
     EvaluationContextBundle,
 )
 from src.core.services.evaluation_llm_client import NvidiaEvaluationResult
-from src.schemas.evaluation_llm import FinalEvaluationRecord
+from src.schemas.evaluation_llm import FinalEvaluationRecord, HiringRecommendation
 
 TECHNICAL_WEIGHT = 0.75
 BEHAVIOURAL_CULTURAL_WEIGHT = 0.15
@@ -174,7 +174,7 @@ def _recommendation(
     validated_violation_count: int,
     critical_violation_count: int,
     skill_scores: dict[str, dict[str, Any]],
-) -> tuple[str, list[str]]:
+) -> tuple[HiringRecommendation, list[str]]:
     """
     Determine the final hiring recommendation based on strict deterministic thresholds.
     Applies hard gates (e.g., critical violations, low technical score) to override the LLM.
@@ -219,13 +219,13 @@ def _strengths_and_concerns(
     skill_scores: dict[str, dict[str, Any]],
 ) -> tuple[list[str], list[str]]:
     """
-    Identify notable strengths and concerns based on the individual skill scores.
+    Identify notable strengths and concerns from individual skill scores.
 
     Args:
         skill_scores: The individual skill scores.
 
     Returns:
-        A tuple of two lists: strengths (skills scoring >= 7.5) and concerns (skills scoring < 5.5).
+        Skills scoring at least 7.0 and skills that trigger the concern thresholds.
     """
     strengths: list[str] = []
     concerns: list[str] = []
@@ -365,7 +365,7 @@ def calculate_final_evaluation(
         raw_overall_score=round(raw_overall_score, 2),
         violation_penalty=round(violation_penalty, 2),
         overall_score=_round_score(final_score),
-        hiring_recommendation=final_recommendation,  # type: ignore[arg-type]
+        hiring_recommendation=final_recommendation,
         model_recommendation=model_recommendation,
         recommendation_override_reason=override_reason,
         overall_summary=output.overall_summary,

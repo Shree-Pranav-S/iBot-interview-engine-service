@@ -568,6 +568,10 @@ OVERALL SUMMARY AND RECOMMENDATION REASONING:
 - recommendation_reasoning must explain WHY this candidate should be hired,
   considered, or not hired based on the evidence. Reference specific skill
   performance, behavioral signals, and any concerns.
+- Write both fields in plain recruiter language. Do NOT include priority
+  scores, numeric skill ratings, weighted aggregates, or parenthetical numbers.
+  Describe performance qualitatively (strong, solid, gap, meets expectations)
+  instead of citing scores.
 - hiring_recommendation is exactly "hire", "consider", or "no hire".
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -444,19 +444,6 @@ SECTION_TRANSITION = (
     "Thank you. Let us leave {current_section} there and continue with {next_section}.",
 )
 
-TIMED_SECTION_TRANSITION = (
-    "To keep us on schedule, let us move from {current_section} to {next_section}.",
-    "We need to keep the interview moving, so let us continue with {next_section}.",
-    "Thank you. With our remaining time, we will now move to {next_section}.",
-    "To make sure we cover the remaining areas, let us shift to {next_section}.",
-    "We are near the end of the time for {current_section}, so let us move to {next_section}.",
-    "I will move us forward so we can cover {next_section} as well.",
-    "To use our time well, let us conclude {current_section} and continue with {next_section}.",
-    "We have limited time left for this section, so our next area will be {next_section}.",
-    "Let us keep to the interview plan and move on to {next_section}.",
-    "I am going to transition us from {current_section} to {next_section} so we can stay on time.",
-)
-
 BARGE_IN_TRANSITION = (
     "As we are running short of time, we need to move on to {next_section}.",
     "I am going to pause you there because we need to move to {next_section}.",
@@ -523,7 +510,6 @@ _BANKS = {
     "technical_question_fallback": TECHNICAL_QUESTION_FALLBACK,
     "behavioural_question_fallback": BEHAVIOURAL_QUESTION_FALLBACK,
     "section_transition": SECTION_TRANSITION,
-    "timed_section_transition": TIMED_SECTION_TRANSITION,
     "barge_in_transition": BARGE_IN_TRANSITION,
     "behavioural_forced_transition": BEHAVIOURAL_FORCED_TRANSITION,
     "closing": CLOSING,

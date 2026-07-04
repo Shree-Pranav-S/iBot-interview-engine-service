@@ -80,14 +80,31 @@ def recent_question_stems(state: InterviewState, *, limit: int = 3) -> list[str]
     return stems[-limit:]
 
 
-def _normalized_question(value: str) -> str:
+def recent_acknowledgements(
+    state: InterviewState,
+    *,
+    limit: int,
+) -> list[str]:
+    """Return recent non-empty interviewer acknowledgement phrases."""
+
+    acknowledgements = [
+        str(item.get("acknowledgement") or "").strip()
+        for item in state.get("asked_questions") or []
+        if str(item.get("acknowledgement") or "").strip()
+    ]
+    return acknowledgements[-limit:]
+
+
+def normalize_question_text(value: str) -> str:
+    """Normalize a question for similarity and duplicate comparisons."""
+
     return " ".join(re.findall(r"[a-z0-9+#.]+", value.casefold()))
 
 
 def _question_tokens(value: str) -> set[str]:
     return {
         token
-        for token in _normalized_question(value).split()
+        for token in normalize_question_text(value).split()
         if token not in _QUESTION_STOP_WORDS
     }
 
@@ -105,11 +122,11 @@ def validate_unique_question(
 ) -> None:
     """Reject exact repeats and high token overlap with prior questions."""
 
-    normalized = _normalized_question(question_text)
+    normalized = normalize_question_text(question_text)
     new_tokens = _question_tokens(question_text)
     for item in asked_questions:
         prior_text = str(item.get("question_text") or "")
-        if normalized == _normalized_question(prior_text):
+        if normalized == normalize_question_text(prior_text):
             raise ValueError("question generator repeated a previous question")
         if allow_related_probe:
             continue

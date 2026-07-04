@@ -49,13 +49,14 @@ class LiveKitInterviewBridge:
         interview_session_id: str,
         connection_id: str,
     ) -> None:
+        """Bind the bridge to one candidate session and graph thread."""
+
         self.candidate_assessment_id = candidate_assessment_id
         self.interview_session_id = interview_session_id
         self.connection_id = connection_id
         self.state: dict[str, Any] | None = None
         self._config = {"configurable": {"thread_id": self.candidate_assessment_id}}
         self._timer_started_monotonic: float | None = None
-        self._timer_started_at: datetime | None = None
         self._elapsed_before_connection_secs = 0
         self._speculative_cache: SpeculativeCacheEntry | None = None
         self._speculative_warm_task: asyncio.Task[None] | None = None
@@ -85,6 +86,13 @@ class LiveKitInterviewBridge:
         values = getattr(snapshot, "values", None)
         return dict(values or {})
 
+    async def _ensure_state(self) -> dict[str, Any]:
+        """Load the graph state on first use and return a safe mapping."""
+
+        if self.state is None:
+            await self.start_or_resume()
+        return self.state or {}
+
     async def start_or_resume(self) -> str:
         """
         Initialize context and opening, or restore the current spoken prompt.
@@ -111,7 +119,6 @@ class LiveKitInterviewBridge:
             )
             started_at = context.get("interview_started_at")
             if isinstance(started_at, datetime):
-                self._timer_started_at = started_at
                 self._timer_started_monotonic = time.monotonic()
                 self.state["timer_started"] = True
                 self.state["timer_started_at"] = started_at.isoformat()
@@ -146,7 +153,6 @@ class LiveKitInterviewBridge:
         if session_id:
             await client.mark_session_in_progress(session_id)
         self._timer_started_monotonic = time.monotonic()
-        self._timer_started_at = started_at
         if session_id:
             await try_record_event_in_background(
                 EventLogCreate(
@@ -211,7 +217,8 @@ class LiveKitInterviewBridge:
             cast(InterviewState, state),
             grace_secs=SECTION_BARGE_IN_GRACE_SECS,
         )
-        section_delay = max(0.0, float(deadline_elapsed - self.elapsed_secs()))
+        elapsed = self.elapsed_secs()
+        section_delay = max(0.0, float(deadline_elapsed - elapsed))
         current_index = int(state.get("current_section_index") or 0)
         behavioural_pending = any(
             index > current_index
@@ -223,9 +230,7 @@ class LiveKitInterviewBridge:
         total_duration = max(1, int(state.get("total_duration_secs") or 1))
         rescue_delay = max(
             0.0,
-            float(
-                total_duration - self.elapsed_secs() - FORCE_BEHAVIOURAL_REMAINING_SECS
-            ),
+            float(total_duration - elapsed - FORCE_BEHAVIOURAL_REMAINING_SECS),
         )
         return min(section_delay, rescue_delay)
 
@@ -256,13 +261,12 @@ class LiveKitInterviewBridge:
         Does not resume LangGraph; results are cached for the final turn submit.
         """
 
-        if self.state is None:
-            await self.start_or_resume()
-        if not self.state or self._is_terminal(self.state):
+        state = await self._ensure_state()
+        if not state or self._is_terminal(state):
             return
-        if self.state.get("phase_complete"):
+        if state.get("phase_complete"):
             return
-        if is_self_intro_phase(self.state):
+        if is_self_intro_phase(state):
             return
 
         self._cancel_speculative_warm()
@@ -323,11 +327,10 @@ class LiveKitInterviewBridge:
             The text for the bot to speak in reply.
         """
 
-        if self.state is None:
-            await self.start_or_resume()
-        if not self.state or self._is_terminal(self.state):
+        state = await self._ensure_state()
+        if not state or self._is_terminal(state):
             return ""
-        if self.state.get("phase_complete"):
+        if state.get("phase_complete"):
             return ""
 
         graph = await get_graph()
@@ -358,9 +361,8 @@ class LiveKitInterviewBridge:
             The text for the bot to speak to prompt the candidate.
         """
 
-        if self.state is None:
-            await self.start_or_resume()
-        if not self.state or self.state.get("phase_complete"):
+        state = await self._ensure_state()
+        if not state or state.get("phase_complete"):
             return ""
 
         graph = await get_graph()
@@ -394,9 +396,8 @@ class LiveKitInterviewBridge:
             The text for the bot to speak (usually a transition to the next section).
         """
 
-        if self.state is None:
-            await self.start_or_resume()
-        if not self.state or self.state.get("should_close"):
+        state = await self._ensure_state()
+        if not state or state.get("should_close"):
             return ""
 
         graph = await get_graph()
@@ -435,7 +436,6 @@ class LiveKitInterviewBridge:
                 "session_status": "COMPLETED",
                 "closing_done": True,
                 "elapsed_secs": elapsed,
-                "remaining_secs": 0,
                 "holistic_evaluation_status": (
                     state.get("holistic_evaluation_status") or "QUEUED"
                 ),

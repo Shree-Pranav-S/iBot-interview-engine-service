@@ -11,4 +11,4 @@ typecheck:
 	uv run mypy src
 
 test:
-	uv run python -m unittest discover -s tests -v
+	uv run pytest

@@ -384,32 +384,6 @@ def _deterministic_classification(
     return None
 
 
-def _resume_has_skill(state: InterviewState) -> bool:
-    """
-    Check if the currently active technical skill is explicitly listed on the candidate's resume.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        True if there is a match, False otherwise.
-    """
-    skill = str(state.get("current_technical_skill") or "").strip().casefold()
-    if not skill:
-        return False
-    for raw in (state.get("resume_context") or {}).get("skills", []):
-        resume_skill = str(raw).strip().casefold()
-        if resume_skill == skill:
-            return True
-        if (
-            resume_skill
-            and min(len(resume_skill), len(skill)) >= 3
-            and (resume_skill in skill or skill in resume_skill)
-        ):
-            return True
-    return False
-
-
 def _violation(
     state: InterviewState,
     violation_type: str,

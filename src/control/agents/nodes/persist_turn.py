@@ -21,6 +21,7 @@ async def persist_turn(
     session_id: str,
     transcript_items: list[dict[str, Any]],
     violations: list[dict[str, Any]],
+    elapsed_secs: int | None = None,
 ) -> None:
     """
     Persist an immutable snapshot of interview turns and violations to the database.
@@ -30,6 +31,7 @@ async def persist_turn(
         session_id: The UUID of the interview session.
         transcript_items: A list of dicts representing new turns (bot or candidate).
         violations: A list of dicts representing detected proctoring violations.
+        elapsed_secs: Optional authoritative elapsed time to persist.
     """
 
     lock = _session_locks.setdefault(session_id, asyncio.Lock())
@@ -38,23 +40,6 @@ async def persist_turn(
             session_id=session_id,
             transcript_items=transcript_items,
             violations=violations,
-        )
-
-
-async def _persist_elapsed(session_id: str, elapsed_secs: int) -> None:
-    """
-    Update the official elapsed time of the interview in the database.
-
-    Args:
-        session_id: The UUID of the interview session.
-        elapsed_secs: The total elapsed seconds.
-    """
-    lock = _session_locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
-        await get_core_api_client().persist_turn(
-            session_id=session_id,
-            transcript_items=[],
-            violations=[],
             elapsed_secs=elapsed_secs,
         )
 
@@ -110,8 +95,14 @@ def _schedule(
             violations=copy.deepcopy(violations or []),
         )
     )
+    _track_task(task, str(state["interview_session_id"]))
+
+
+def _track_task(task: asyncio.Task[None], session_id: str) -> None:
+    """Track a persistence task until its completion callback runs."""
+
     _background_persistence_tasks.add(task)
-    _background_task_sessions[task] = str(state["interview_session_id"])
+    _background_task_sessions[task] = session_id
     task.add_done_callback(_task_finished)
 
 
@@ -128,16 +119,16 @@ def schedule_elapsed_persistence(
         state: The current interview state.
         elapsed_secs: Total time elapsed.
     """
-
+    session_id = str(state["interview_session_id"])
     task = asyncio.create_task(
-        _persist_elapsed(
-            str(state["interview_session_id"]),
-            max(0, int(elapsed_secs)),
+        persist_turn(
+            session_id=session_id,
+            transcript_items=[],
+            violations=[],
+            elapsed_secs=max(0, int(elapsed_secs)),
         )
     )
-    _background_persistence_tasks.add(task)
-    _background_task_sessions[task] = str(state["interview_session_id"])
-    task.add_done_callback(_task_finished)
+    _track_task(task, session_id)
 
 
 async def persist_bot_output(state: InterviewState) -> dict[str, Any]:

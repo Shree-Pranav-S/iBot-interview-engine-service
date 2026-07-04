@@ -14,7 +14,6 @@ from pydantic import (
 )
 
 HiringRecommendation = Literal["hire", "consider", "no hire"]
-ViolationSeverity = Literal["low", "medium", "high", "critical"]
 RelevanceClass = Literal[
     "direct_match",
     "close_equivalent",
@@ -38,6 +37,7 @@ class EvaluationModel(BaseModel):
         info: ValidationInfo,
     ) -> Any:
         """Apply the backend score-range safeguard before field validation."""
+        del cls
 
         name = info.field_name
         upper_bound = (
@@ -56,6 +56,8 @@ class EvaluationModel(BaseModel):
 
 
 class EvaluationCandidateContext(EvaluationModel):
+    """Candidate, role, assessment, and interview timing context."""
+
     candidate_assessment_id: str
     session_id: str
     assessment_id: str
@@ -103,6 +105,8 @@ class EvaluationInput(EvaluationModel):
 
 
 class SkillScoreOutput(EvaluationModel):
+    """Model score and confidence for one planned technical skill."""
+
     score: float = Field(ge=0.0, le=10.0)
     priority_score: float = Field(ge=0.0, le=10.0)
     questions_evaluated: int = Field(ge=0)
@@ -110,18 +114,24 @@ class SkillScoreOutput(EvaluationModel):
 
 
 class SectionCommunicationOutput(EvaluationModel):
+    """Communication score, summary, and evidence for one section."""
+
     score: float = Field(ge=0.0, le=10.0)
     summary: str = Field(min_length=1, max_length=1800)
     evidence: list[str] = Field(default_factory=list, max_length=16)
 
 
 class SectionCommunicationScores(EvaluationModel):
+    """Communication breakdown across interview section types."""
+
     self_intro: SectionCommunicationOutput
     technical: SectionCommunicationOutput
     behavioural_cultural: SectionCommunicationOutput
 
 
 class SeverityCounts(EvaluationModel):
+    """Validated violation counts grouped by severity."""
+
     low: int = Field(ge=0)
     medium: int = Field(ge=0)
     high: int = Field(ge=0)
@@ -129,10 +139,14 @@ class SeverityCounts(EvaluationModel):
 
     @property
     def total(self) -> int:
+        """Return the total number of validated violations."""
+
         return self.low + self.medium + self.high + self.critical
 
 
 class ViolationSummaryOutput(EvaluationModel):
+    """Validated violation aggregate returned by the evaluator."""
+
     has_violation: bool
     validated_violation_count: int = Field(ge=0)
     severity_counts: SeverityCounts
@@ -140,6 +154,8 @@ class ViolationSummaryOutput(EvaluationModel):
 
     @model_validator(mode="after")
     def validate_counts(self) -> ViolationSummaryOutput:
+        """Ensure aggregate flags and counts agree."""
+
         if self.severity_counts.total != self.validated_violation_count:
             raise ValueError("severity_counts must sum to validated_violation_count")
         if self.has_violation != (self.validated_violation_count > 0):
@@ -209,6 +225,8 @@ class HolisticEvaluationLLMOutput(EvaluationModel):
     def validate_evidence_and_skill_maps(
         self,
     ) -> HolisticEvaluationLLMOutput:
+        """Require exact skill maps and evidence for strong claims."""
+
         score_keys = set(self.skill_scores)
         if set(self.skill_summary) != score_keys:
             raise ValueError("skill_summary keys must exactly match skill_scores keys")

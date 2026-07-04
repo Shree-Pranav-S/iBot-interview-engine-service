@@ -18,6 +18,8 @@ class TransientEvaluationError(EvaluationError):
         *,
         retry_after_seconds: int | None = None,
     ) -> None:
+        """Attach an optional provider-requested retry delay."""
+
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
 

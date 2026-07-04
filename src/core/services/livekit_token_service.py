@@ -32,6 +32,8 @@ class LiveKitTokenService:
         self,
         candidate_session_service: CandidateSessionService | None = None,
     ) -> None:
+        """Configure the candidate-session authorization dependency."""
+
         self._candidate_session_service = (
             candidate_session_service or CandidateSessionService()
         )
@@ -84,6 +86,32 @@ class LiveKitTokenService:
         raise InternalServerException("Candidate session expiry is missing.")
 
     @staticmethod
+    def _access_token(
+        *,
+        participant_identity: str,
+        candidate_name: str,
+        room_name: str,
+        ttl: timedelta,
+    ) -> api.AccessToken:
+        """Build the shared candidate access-token grants."""
+
+        return (
+            api.AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+            .with_identity(participant_identity)
+            .with_name(candidate_name)
+            .with_ttl(ttl)
+            .with_grants(
+                api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
+            )
+        )
+
+    @staticmethod
     async def _ensure_agent_dispatch(
         room_name: str,
         agent_metadata: dict[str, str],
@@ -113,12 +141,11 @@ class LiveKitTokenService:
                     raise
                 # Explicit dispatch creates a missing room automatically.
                 dispatches = []
-            already_dispatched = any(
+            if any(
                 dispatch.agent_name == settings.LIVEKIT_AGENT_NAME
                 and dispatch.metadata == encoded_metadata
                 for dispatch in dispatches
-            )
-            if already_dispatched:
+            ):
                 return
 
             await livekit_api.agent_dispatch.create_dispatch(
@@ -169,22 +196,12 @@ class LiveKitTokenService:
             "connection_id": context.connection_id,
         }
 
-        token = (
-            api.AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
-            .with_identity(participant_identity)
-            .with_name(candidate_name)
-            .with_ttl(self._livekit_ttl(context.session_token_expires_at))
-            .with_grants(
-                api.VideoGrants(
-                    room_join=True,
-                    room=room_name,
-                    can_publish=True,
-                    can_subscribe=True,
-                    can_publish_data=True,
-                )
-            )
-            .to_jwt()
-        )
+        token = self._access_token(
+            participant_identity=participant_identity,
+            candidate_name=candidate_name,
+            room_name=room_name,
+            ttl=self._livekit_ttl(context.session_token_expires_at),
+        ).to_jwt()
         await self._ensure_agent_dispatch(room_name, agent_metadata)
 
         return LiveKitTokenResponse(
@@ -234,25 +251,16 @@ class LiveKitTokenService:
         }
 
         token = (
-            api.AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
-            .with_identity(participant_identity)
-            .with_name(candidate_name)
-            .with_ttl(
-                min(
+            self._access_token(
+                participant_identity=participant_identity,
+                candidate_name=candidate_name,
+                room_name=room_name,
+                ttl=min(
                     timedelta(minutes=30),
                     self._livekit_ttl(
                         self._datetime_value(context["session_token_expires_at"])
                     ),
-                )
-            )
-            .with_grants(
-                api.VideoGrants(
-                    room_join=True,
-                    room=room_name,
-                    can_publish=True,
-                    can_subscribe=True,
-                    can_publish_data=True,
-                )
+                ),
             )
             .with_room_config(
                 api.RoomConfiguration(
