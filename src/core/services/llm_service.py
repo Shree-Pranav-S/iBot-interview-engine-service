@@ -295,12 +295,7 @@ async def respond(
     *,
     key_slot: int | None = None,
 ) -> ResponseModelT:
-    """Run the merged classify/evaluate/generate interviewer-turn call.
-
-    This is the single in-interview reasoning call: it routes the candidate
-    utterance, judges the answer, and produces the next spoken question or
-    clarification in one round trip.
-    """
+    """Run stage-two evaluation and interviewer response generation."""
     return await _call_with_fallback(
         purpose="interviewer",
         response_model=response_model,
@@ -309,6 +304,25 @@ async def respond(
         messages=messages,
         max_tokens=settings.GROQ_INTERVIEWER_MAX_TOKENS,
         temperature=settings.GROQ_INTERVIEWER_TEMPERATURE,
+    )
+
+
+async def classify(
+    messages: list[dict[str, str]],
+    response_model: type[ResponseModelT],
+    *,
+    key_slot: int | None = None,
+) -> ResponseModelT:
+    """Classify one candidate utterance with the dedicated fast model."""
+
+    return await _call_with_fallback(
+        purpose="classification",
+        response_model=response_model,
+        key_slot=key_slot,
+        model=settings.GROQ_CLASSIFY_MODEL,
+        messages=messages,
+        max_tokens=settings.GROQ_CLASSIFY_MAX_TOKENS,
+        temperature=settings.GROQ_CLASSIFY_TEMPERATURE,
     )
 
 

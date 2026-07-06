@@ -52,12 +52,6 @@ _PLACEHOLDER_PATTERNS = (
 )
 
 
-def normalize_turn_text(value: str) -> str:
-    """Normalize candidate speech for speculative-cache comparison."""
-
-    return " ".join(re.findall(r"[a-z0-9']+", value.casefold()))
-
-
 def framing_hint(seed: str, sequence_number: int) -> str:
     """Rotate a deterministic framing mode from seed and turn sequence."""
 

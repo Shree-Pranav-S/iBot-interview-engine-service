@@ -324,6 +324,21 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
             silence_stage="none",
         )
 
+    if response_type == "interview_meta":
+        meta_type = str(classification.get("interview_meta_type") or "")
+        template_name = (
+            "interview_meta_time_remaining"
+            if meta_type == "time_remaining"
+            else "interview_meta_guidance"
+        )
+        return _reply(
+            state,
+            choose_template(template_name),
+            f"interview_meta_{meta_type or 'guidance'}",
+            question_type="interview_meta_response",
+            silence_stage="none",
+        )
+
     if response_type == "answer":
         intro_text = str(state.get("previous_candidate_response") or "")
         if is_intro and self_intro_is_substantial(state, intro_text):
@@ -363,8 +378,8 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
             silence_stage="none",
         )
     if clarification_type == "rephrase_question":
-        # The merged interviewer-turn call may have already produced the rephrase in
-        # the same round trip; only call the rephrase model when it did not.
+        # Stage two normally produces the rephrase; call the dedicated rephrase
+        # fallback only when that response was unavailable.
         rephrased_question = str(
             state.get("pending_clarification_text") or ""
         ).strip() or await _rephrase_question(state, question)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
 
-from src.core.services.candidate_session_service import CandidateSessionService
+from src.core.services.core_api_session_service import CoreApiSessionService
 from src.core.services.livekit_token_service import LiveKitTokenService
 from src.schemas.common import APIResponse
 from src.schemas.livekit import (
@@ -24,10 +24,10 @@ def get_livekit_token_service() -> LiveKitTokenService:
     return LiveKitTokenService()
 
 
-def get_candidate_session_service() -> CandidateSessionService:
-    """Build the candidate session lifecycle service."""
+def get_core_api_session_service() -> CoreApiSessionService:
+    """Build the core-api session lifecycle delegate."""
 
-    return CandidateSessionService()
+    return CoreApiSessionService()
 
 
 @router.post(
@@ -42,7 +42,7 @@ def get_candidate_session_service() -> CandidateSessionService:
 )
 async def enter_candidate_session(
     payload: CandidateSessionEntryRequest,
-    service: CandidateSessionService = Depends(get_candidate_session_service),
+    service: CoreApiSessionService = Depends(get_core_api_session_service),
 ) -> APIResponse[CandidateSessionBootstrapResponse]:
     """Exchange an invitation for durable candidate session context."""
 
@@ -68,7 +68,7 @@ async def enter_candidate_session(
 )
 async def get_candidate_session_context(
     payload: CandidateSessionContextRequest,
-    service: CandidateSessionService = Depends(get_candidate_session_service),
+    service: CoreApiSessionService = Depends(get_core_api_session_service),
 ) -> APIResponse[CandidateSessionBootstrapResponse]:
     """Restore candidate session context from a browser session token."""
 

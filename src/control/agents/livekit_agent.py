@@ -30,18 +30,27 @@ from livekit.agents import (
 from livekit.plugins import deepgram
 
 from src.config.settings import settings
-from src.control.agents.nodes.classify_response import will_bypass_interviewer_llm
+from src.control.agents.nodes.classify_response import (
+    self_intro_is_substantial,
+    will_bypass_interviewer_llm,
+)
 from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template_avoiding
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
-from src.utils.livekit import chunk_for_tts
+from src.utils.livekit import (
+    INTERVIEW_CLOSING_EVENT,
+    INTERVIEW_DATA_TOPIC,
+    chunk_for_tts,
+)
 
 logger = logging.getLogger("interview-livekit-agent")
 USER_AWAY_TIMEOUT_SECS = 5.0
 THINK_EXTENSION_TIMEOUT_SECS = 15.0
-POST_TURN_SILENCE_GUARD_SECS = 0.5
+POST_TURN_SILENCE_GUARD_SECS = 0.3
 POST_BARGE_RESUMED_SPEECH_GUARD_SECS = 0.75
+SELF_INTRO_TURN_SETTLE_SECS = 1.2
+SELF_INTRO_TRANSITION_REPLY_TYPE = "self_intro_transition_question"
 DEMO_GREETING = (
     "Welcome to this demo interview. This is a short practice space to help "
     "you become comfortable with the interview environment. Please make "
@@ -264,6 +273,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._user_turn_started_at: float | None = None
         self._last_user_turn_duration_ms: int | None = None
         self._last_user_turn_finished_at: float | None = None
+        self._user_transcript_generation = 0
+        self._self_intro_pending_text = ""
+        self._self_intro_pending_duration_ms: int | None = None
+        self._self_intro_transition_input_guard = False
         self._interview_closed = False
         self._agent_is_speaking = False
         self._last_agent_speech_finished_at: float | None = None
@@ -332,6 +345,59 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._agent_is_speaking = False
         self._last_agent_speech_finished_at = time.monotonic()
 
+    def _activate_self_intro_transition_guard(self) -> None:
+        """Prevent resumed intro speech from interrupting the first technical question."""
+
+        if self._self_intro_transition_input_guard:
+            return
+        try:
+            self.session.input.set_audio_enabled(False)
+        except RuntimeError:
+            logger.warning(
+                "Could not protect self-introduction transition playout",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+            return
+        self._self_intro_transition_input_guard = True
+
+    def _release_self_intro_transition_guard(self) -> None:
+        """Restore candidate audio after the protected transition finishes."""
+
+        if not self._self_intro_transition_input_guard:
+            return
+        self._self_intro_transition_input_guard = False
+        if self._interview_closed:
+            return
+        try:
+            self.session.input.set_audio_enabled(True)
+        except RuntimeError:
+            logger.warning(
+                "Could not restore audio after self-introduction transition",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
+    def _clear_self_intro_pending_turn(self) -> None:
+        self._self_intro_pending_text = ""
+        self._self_intro_pending_duration_ms = None
+
+    def _buffer_self_intro_fragment(
+        self,
+        text: str,
+        duration_ms: int | None,
+    ) -> None:
+        """Join LiveKit turns split by a brief pause into one introduction."""
+
+        buffered = self._self_intro_pending_text
+        if not buffered or text.casefold().startswith(buffered.casefold()):
+            self._self_intro_pending_text = text
+        elif not buffered.casefold().endswith(text.casefold()):
+            self._self_intro_pending_text = f"{buffered} {text}".strip()
+
+        if duration_ms is not None:
+            self._self_intro_pending_duration_ms = (
+                int(self._self_intro_pending_duration_ms or 0) + duration_ms
+            )
+
     async def _start_timer_after_first_speech(self) -> None:
         try:
             await self.bridge.start_timer()
@@ -357,13 +423,17 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             return
 
     def _schedule_section_barge_watchdog(self) -> None:
+        timer_running = self._timer_start_requested or bool(
+            (self.bridge.state or {}).get("timer_started")
+        )
         if (
             self._interview_closed
             or self._barge_in_active
             or self._agent_is_speaking
-            or not self._timer_start_requested
+            or not timer_running
         ):
             return
+        self._timer_start_requested = True
         delay = self.bridge.seconds_until_section_barge_in()
         if delay is None:
             return
@@ -415,6 +485,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         )
         await handle.wait_for_playout()
         self._mark_agent_speech_finished()
+        self._schedule_section_barge_watchdog()
 
     async def _say_graph_reply(
         self,
@@ -427,15 +498,50 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         if not text:
             return
-        await self._say_text(
-            text,
-            allow_interruptions=(
-                not is_closing if allow_interruptions is None else allow_interruptions
-            ),
-            add_to_chat_ctx=True,
+        protect_intro_transition = (
+            not is_closing
+            and str((self.bridge.state or {}).get("bot_reply_type") or "")
+            == SELF_INTRO_TRANSITION_REPLY_TYPE
         )
+        if protect_intro_transition:
+            self._activate_self_intro_transition_guard()
+        if is_closing:
+            await self._publish_interview_closing_signal()
+        try:
+            await self._say_text(
+                text,
+                allow_interruptions=(
+                    False
+                    if protect_intro_transition
+                    else (
+                        not is_closing
+                        if allow_interruptions is None
+                        else allow_interruptions
+                    )
+                ),
+                add_to_chat_ctx=True,
+            )
+        finally:
+            if protect_intro_transition:
+                self._release_self_intro_transition_guard()
         if is_closing:
             await self._finalize_after_closing()
+
+    async def _publish_interview_closing_signal(self) -> None:
+        """Notify the candidate UI that the closing message is starting."""
+
+        try:
+            room = self.session.room_io.room
+            await room.local_participant.publish_data(
+                json.dumps({"type": INTERVIEW_CLOSING_EVENT}),
+                topic=INTERVIEW_DATA_TOPIC,
+                reliable=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to publish interview closing signal",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
 
     def track_agent_state(self, new_state: str) -> None:
         """
@@ -470,6 +576,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                     asyncio.create_task(self._finalize_after_closing())
             elif not self._barge_in_active:
                 self._schedule_section_barge_watchdog()
+        if new_state in {"idle", "listening"}:
+            self._release_self_intro_transition_guard()
 
     async def on_enter(self) -> None:
         """
@@ -490,12 +598,25 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
 
         self._mark_closed_from_state()
+        if bool((self.bridge.state or {}).get("timer_started")):
+            # A new agent instance is created after reconnect. Restore its local
+            # watchdog guard from the durable timer state before speaking again.
+            self._timer_start_requested = True
+
+        if not self._interview_closed and self._timer_start_requested:
+            remaining = self.bridge.seconds_until_section_barge_in()
+            if remaining is not None and remaining <= 0.1:
+                # The reconnect may occur exactly at behavioural rescue or total
+                # expiry. Advance the suspended graph before replaying a stale prompt.
+                await self.handle_section_time_barge_in()
+                return
 
         if not opening_text:
             logger.warning(
                 "Interview graph returned no opening text",
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
+            self._schedule_section_barge_watchdog()
             return
 
         await self._say_graph_reply(
@@ -564,6 +685,8 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         """
 
         normalized = " ".join((text or "").split())
+        if normalized:
+            self._user_transcript_generation += 1
         if is_final:
             if normalized:
                 committed = self._committed_user_transcript
@@ -615,6 +738,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         del turn_ctx
 
         if self._interview_closed:
+            self._clear_self_intro_pending_turn()
             raise StopResponse()
 
         if self._barge_in_active or self._discard_inflight_user_turn:
@@ -622,6 +746,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             self._user_turn_started_at = None
             self._last_user_turn_duration_ms = None
             self._last_user_turn_finished_at = time.monotonic()
+            self._clear_self_intro_pending_turn()
             self._clear_live_user_transcript()
             raise StopResponse()
 
@@ -633,8 +758,33 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if self._user_turn_started_at is not None:
             self.track_user_state("listening")
 
-        self._pending_duration_ms = self._last_user_turn_duration_ms
+        duration_ms = self._last_user_turn_duration_ms
         self._last_user_turn_duration_ms = None
+        state = cast(InterviewState, self.bridge.state or {})
+        if is_self_intro_phase(state):
+            self._buffer_self_intro_fragment(candidate_text, duration_ms)
+            transcript_generation = self._user_transcript_generation
+            await asyncio.sleep(SELF_INTRO_TURN_SETTLE_SECS)
+
+            if (
+                self._interview_closed
+                or self._barge_in_active
+                or self._discard_inflight_user_turn
+            ):
+                self._clear_self_intro_pending_turn()
+                raise StopResponse()
+
+            if self._user_transcript_generation != transcript_generation:
+                # LiveKit committed a semantic end-of-turn at a natural pause.
+                # Keep this fragment buffered; the next callback will append the
+                # resumed speech and submit the complete introduction once quiet.
+                raise StopResponse()
+
+            candidate_text = self._self_intro_pending_text
+            duration_ms = self._self_intro_pending_duration_ms
+            self._clear_self_intro_pending_turn()
+
+        self._pending_duration_ms = duration_ms
         self._pending_user_text = candidate_text
         self._clear_live_user_transcript()
         self._awaiting_agent_reply = True
@@ -886,15 +1036,6 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                     return cleaned
         return " ".join(self._live_user_transcript.split())
 
-    async def _warm_speculative_turn(self, candidate_text: str) -> None:
-        try:
-            await self.bridge.warm_speculative_turn(candidate_text)
-        except Exception:
-            logger.exception(
-                "Speculative interviewer warmup failed",
-                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
-            )
-
     async def llm_node(
         self,
         chat_ctx: llm.ChatContext,
@@ -906,11 +1047,11 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         the candidate's transcribed speech.
 
         A short, content-neutral acknowledgement is spoken immediately while the
-        single merged interviewer-turn call runs concurrently, so the candidate
-        hears a human-like reply with no perceptible dead air before the question.
+        staged interviewer reasoning runs concurrently, so the candidate hears a
+        human-like reply with no perceptible dead air before the question.
 
         Args:
-            chat_ctx: The chat context for preemptive or final user text.
+            chat_ctx: The chat context for final user text.
             tools: Tools available (unused).
             model_settings: Model settings (unused).
 
@@ -937,22 +1078,9 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             return
 
         if not is_final_turn:
-            preview = {
-                **(self.bridge.state or {}),
-                "previous_candidate_response": candidate_text,
-            }
-            if settings.PREEMPTIVE_GENERATION_ENABLED and not is_self_intro_phase(
-                preview
-            ):
-                asyncio.create_task(self._warm_speculative_turn(candidate_text))
             return
 
         try:
-            # Start the reasoning call first so it overlaps with the filler playout.
-            graph_task = asyncio.create_task(
-                self._run_candidate_turn(candidate_text, duration_ms)
-            )
-
             preview_state = cast(
                 InterviewState,
                 {
@@ -960,6 +1088,20 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                     "previous_candidate_response": candidate_text,
                 },
             )
+            if is_self_intro_phase(preview_state) and self_intro_is_substantial(
+                preview_state,
+                candidate_text,
+            ):
+                # Turn completion has already been accepted and reply scheduling
+                # has begun. Protect graph generation and playout from a late
+                # continuation without interfering with LiveKit's turn callback.
+                self._activate_self_intro_transition_guard()
+
+            # Start the reasoning call first so it overlaps with the filler playout.
+            graph_task = asyncio.create_task(
+                self._run_candidate_turn(candidate_text, duration_ms)
+            )
+
             skip_filler = will_bypass_interviewer_llm(preview_state, candidate_text)
             if settings.ENABLE_ACK_FILLER and not skip_filler:
                 for chunk in chunk_for_tts(self._choose_filler()):
@@ -968,12 +1110,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             reply_text, is_closing_reply = await graph_task
 
             if not reply_text:
+                self._release_self_intro_transition_guard()
                 return
 
             if is_closing_reply:
                 # Disable microphone ingestion before the first closing audio
                 # frame so the final statement cannot be interrupted.
                 self.session.input.set_audio_enabled(False)
+                await self._publish_interview_closing_signal()
+            elif (
+                str((self.bridge.state or {}).get("bot_reply_type") or "")
+                == SELF_INTRO_TRANSITION_REPLY_TYPE
+            ):
+                self._activate_self_intro_transition_guard()
 
             for chunk in chunk_for_tts(reply_text):
                 yield chunk
@@ -1065,10 +1214,11 @@ async def interview_agent(ctx: agents.JobContext) -> None:
                 "resume_false_interruption": True,
                 "discard_audio_if_uninterruptible": True,
             },
-            preemptive_generation={
-                "enabled": settings.PREEMPTIVE_GENERATION_ENABLED,
-                "preemptive_tts": False,
-            },
+            # This agent's custom llm_node can only submit finalized turns to
+            # LangGraph. LiveKit enables native preemptive generation by default;
+            # allowing it here creates an empty preliminary response which may
+            # then be reused for short requests such as "rephrase" or "yes".
+            preemptive_generation={"enabled": False},
         ),
         user_away_timeout=USER_AWAY_TIMEOUT_SECS,
     )

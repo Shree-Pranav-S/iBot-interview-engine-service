@@ -10,9 +10,7 @@ from livekit import api
 
 from src.config.settings import settings
 from src.core.exceptions import InternalServerException
-from src.core.services.candidate_session_service import (
-    CandidateSessionService,
-)
+from src.core.services.core_api_session_service import CoreApiSessionService
 from src.schemas.livekit import (
     CandidateConnectionContext,
     LiveKitTokenRequest,
@@ -30,12 +28,12 @@ class LiveKitTokenService:
 
     def __init__(
         self,
-        candidate_session_service: CandidateSessionService | None = None,
+        core_api_session_service: CoreApiSessionService | None = None,
     ) -> None:
-        """Configure the candidate-session authorization dependency."""
+        """Configure the core-api session authorization dependency."""
 
-        self._candidate_session_service = (
-            candidate_session_service or CandidateSessionService()
+        self._core_api_session_service = (
+            core_api_session_service or CoreApiSessionService()
         )
 
     @staticmethod
@@ -177,7 +175,7 @@ class LiveKitTokenService:
 
         self._validate_configuration()
         context: CandidateConnectionContext = (
-            await self._candidate_session_service.authorize_interview_connection(
+            await self._core_api_session_service.authorize_interview_connection(
                 payload.session_token
             )
         )
@@ -230,7 +228,7 @@ class LiveKitTokenService:
         """
 
         self._validate_configuration()
-        context = await self._candidate_session_service.authorize_demo(
+        context = await self._core_api_session_service.authorize_demo(
             payload.session_token
         )
         candidate_assessment_id = str(context["candidate_assessment_id"])

@@ -22,14 +22,14 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import ValidationError
 
 from src.config.settings import settings
-from src.core.services.evaluation_context_builder import (
-    EvaluationContextBundle,
-    normalize_skill_key,
-)
-from src.core.services.evaluation_errors import (
+from src.core.exceptions.evaluation import (
     EvaluationSchemaError,
     PermanentEvaluationError,
     TransientEvaluationError,
+)
+from src.core.services.evaluation_context_builder import (
+    EvaluationContextBundle,
+    normalize_skill_key,
 )
 from src.core.services.evaluation_prompt import (
     HOLISTIC_EVALUATION_SYSTEM_PROMPT,

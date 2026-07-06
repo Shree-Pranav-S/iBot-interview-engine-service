@@ -36,7 +36,7 @@ _checkpointer: Any | None = None
 
 
 def _route_after_await(state: InterviewState) -> str:
-    """Route to barge-in handler if timed out, otherwise to the merged turn node."""
+    """Route to barge-in handling or staged interviewer-turn processing."""
     if state.get("next_action") == "force_section_time_barge_in":
         return "force_section_time_barge_in"
     return "interviewer_turn"
@@ -49,7 +49,7 @@ def _route_after_candidate_persistence(state: InterviewState) -> str:
     next_action = state.get("next_action")
     if state.get("should_close") or next_action == "generate_closing":
         return "generate_closing_message"
-    if next_action in {"answer_question", "generate_next_question"}:
+    if next_action == "generate_next_question":
         return "generate_next_question"
     return "generate_bot_response"
 

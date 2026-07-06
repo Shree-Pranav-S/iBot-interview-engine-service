@@ -265,7 +265,7 @@ def decide_time_action(state: InterviewState) -> dict[str, Any]:
     """
     Decide what should follow a (hypothetically) substantial answer, without an LLM.
 
-    Pure helper so the merged interviewer-turn node can resolve the target
+    Pure helper so the staged interviewer-turn node can resolve the target
     section before asking the model to generate the next question. The decision uses
     only elapsed time and section budgets, so it is identical whether computed before
     or after classification.
@@ -410,6 +410,17 @@ async def force_section_time_barge_in(
             **_closing(timing, reason="interview_time_exhausted"),
             **persistence_updates,
             "barge_in_triggered": True,
+        }
+
+    if state.get("current_section_kind") == "self_intro":
+        # A self-introduction transitions only after LiveKit confirms the completed
+        # candidate turn and the deterministic substantiality rule accepts it.
+        # Ignore stale/premature section watchdog events while total time remains.
+        return {
+            **_timing_updates(timing),
+            "pending_candidate_turn": None,
+            "barge_in_triggered": False,
+            "next_action": "await_candidate_response",
         }
 
     behavioural_rescue = _next_section(

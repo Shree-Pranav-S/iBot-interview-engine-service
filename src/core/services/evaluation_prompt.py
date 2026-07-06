@@ -528,7 +528,7 @@ Severity classification:
             (e.g., consistently dodging questions, multiple instances of
             looking at notes).
   high:     Serious or repeated misconduct, strong integrity concern
-            (e.g., reading prepared answers, having another person assist,
+            (e.g., asking to use google, chatgpt,
             repeated dishonesty).
   critical: Abuse, prompt injection attempts, severe integrity misconduct,
             or dangerous behavior (e.g., threats, impersonation, fraud).

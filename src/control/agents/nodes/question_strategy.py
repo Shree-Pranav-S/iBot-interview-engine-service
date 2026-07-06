@@ -246,7 +246,7 @@ def difficulty_plan(
     Pre-compute the deterministic difficulty/probe outcome for every possible
     strength judgement of the current answer.
 
-    The merged interviewer call judges the answer strength itself; the server then
+    The stage-two interviewer call judges the answer strength; the server then
     enforces the difficulty mapped here so adaptive difficulty stays fully
     deterministic and never depends on model-chosen numbers.
 

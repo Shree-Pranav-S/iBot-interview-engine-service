@@ -352,6 +352,23 @@ QUESTION_DOUBT_FALLBACK = (
     "Please respond at the level your experience supports, focusing on: {question}",
 )
 
+INTERVIEW_META_GUIDANCE = (
+    "Explain your reasoning clearly, confidently, and thoroughly, and you will be in a strong position.",
+    "Focus on showing that you understand the concepts and can explain your thinking clearly.",
+    "Give direct answers, talk through your reasoning, and use concrete examples when they help.",
+    "Stay calm and explain what you know clearly; thoughtful reasoning matters more than perfect wording.",
+    "Answer each question directly and make your understanding visible through a clear explanation.",
+    "You will be assessed on your understanding, relevance, and how clearly you explain your approach.",
+    "Be concise but complete, and support your answers with reasoning or practical examples where possible.",
+    "There is no special trick; listen carefully, answer honestly, and explain your thought process.",
+    "Show both what you know and how you arrived at your answer, and you will do fine.",
+    "Keep your answers relevant, confident, and well explained, with enough detail to show your understanding.",
+)
+
+INTERVIEW_META_TIME_REMAINING = (
+    "You can view the timer at the top right of your screen.",
+) * 10
+
 QUESTION_GENERATION_FALLBACK_ACKNOWLEDGEMENT = (
     "Thank you for sharing your perspective. Let us continue.",
     "I have noted that response. Let us look at another aspect.",
@@ -458,17 +475,8 @@ BARGE_IN_TRANSITION = (
 )
 
 BEHAVIOURAL_FORCED_TRANSITION = (
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-    "Due to lack of time lets move to the behavioural section.",
-)
+    "Due to lack of time, we need to move to the behavioural and cultural section.",
+) * 10
 
 CLOSING = (
     "Thank you for completing your interview with {company_name}. We appreciate the time and thought you shared today. Your responses have been submitted, and the recruiting team will handle the next steps.",
@@ -504,6 +512,8 @@ _BANKS = {
     "self_intro_elaborate": SELF_INTRO_ELABORATE,
     "substantial_acknowledgement": SUBSTANTIAL_ACKNOWLEDGEMENT,
     "question_doubt_fallback": QUESTION_DOUBT_FALLBACK,
+    "interview_meta_guidance": INTERVIEW_META_GUIDANCE,
+    "interview_meta_time_remaining": INTERVIEW_META_TIME_REMAINING,
     "question_generation_fallback_acknowledgement": (
         QUESTION_GENERATION_FALLBACK_ACKNOWLEDGEMENT
     ),

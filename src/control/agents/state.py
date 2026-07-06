@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-ResponseType = Literal["answer", "clarification", "irrelevant", "silence"]
+ResponseType = Literal[
+    "answer",
+    "clarification",
+    "irrelevant",
+    "interview_meta",
+    "silence",
+]
 Difficulty = Literal["easy", "medium", "hard"]
 SilenceStage = Literal[
     "none",
@@ -42,7 +48,6 @@ class InterviewState(TypedDict, total=False):
     # LiveKit input for the current turn.
     candidate_event: dict[str, Any] | str | None
     previous_candidate_response: str
-    speculative_interviewer_result: dict[str, Any] | None
     # Stable key-pool affinity captured before this candidate turn is processed.
     # It survives candidate persistence so regeneration/rephrasing stays on the
     # same organization even after ``turn_number`` advances.
@@ -68,7 +73,7 @@ class InterviewState(TypedDict, total=False):
     bot_reply_text: str
     bot_reply_type: str
     response_preface_text: str | None
-    # Merged interviewer-turn clarification and closing handoff.
+    # Staged interviewer clarification and closing handoff.
     pregenerated_closing_lead: str | None
     pending_clarification_text: str | None
     silence_stage: SilenceStage

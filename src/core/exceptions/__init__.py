@@ -10,6 +10,13 @@ from src.core.exceptions.base import (
     InternalServerException,
     NotFoundException,
 )
+from src.core.exceptions.evaluation import (
+    EvaluationError,
+    EvaluationNotReadyError,
+    EvaluationSchemaError,
+    PermanentEvaluationError,
+    TransientEvaluationError,
+)
 
 __all__ = [
     "AppException",
@@ -20,4 +27,9 @@ __all__ = [
     "InternalServerException",
     "BadGatewayException",
     "NotFoundException",
+    "EvaluationError",
+    "EvaluationNotReadyError",
+    "EvaluationSchemaError",
+    "PermanentEvaluationError",
+    "TransientEvaluationError",
 ]

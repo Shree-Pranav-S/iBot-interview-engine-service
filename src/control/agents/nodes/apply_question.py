@@ -56,6 +56,11 @@ def apply_resolved_question(
             current_difficulty = held
 
     spoken_text = f"{acknowledgement} {question_text}".strip()
+    bot_reply_type = (
+        "self_intro_transition_question"
+        if state.get("transition_reason") == "self_introduction_complete"
+        else "new_question"
+    )
     runtime_sections = list(state.get("runtime_sections") or [])
     section_budgets = {
         str(key): int(value)
@@ -193,7 +198,7 @@ def apply_resolved_question(
         "barge_in_triggered": False,
         "pending_clarification_text": None,
         "bot_reply_text": spoken_text,
-        "bot_reply_type": "new_question",
+        "bot_reply_type": bot_reply_type,
         "pending_bot_turn": pending_bot_turn,
         "response_preface_text": None,
         "skip_attempts_for_current_question": 0,

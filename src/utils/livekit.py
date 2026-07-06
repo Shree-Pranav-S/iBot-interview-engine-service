@@ -21,6 +21,10 @@ def candidate_participant_identity(candidate_id: str) -> str:
     return f"candidate-{candidate_id}"
 
 
+INTERVIEW_DATA_TOPIC = "ibot.interview"
+INTERVIEW_CLOSING_EVENT = "interview_closing"
+
+
 def chunk_for_tts(text: str, *, max_chars: int = 120) -> list[str]:
     """Split text into small sentence-ish chunks for responsive TTS."""
 

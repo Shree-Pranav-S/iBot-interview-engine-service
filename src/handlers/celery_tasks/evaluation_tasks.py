@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any
 
-from src.core.services.evaluation_errors import (
+from src.core.exceptions.evaluation import (
     PermanentEvaluationError,
     TransientEvaluationError,
 )

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from src.core.services.evaluation_errors import PermanentEvaluationError
+from src.core.exceptions.evaluation import PermanentEvaluationError
 from src.schemas.evaluation_llm import (
     EvaluationCandidateContext,
     EvaluationInput,

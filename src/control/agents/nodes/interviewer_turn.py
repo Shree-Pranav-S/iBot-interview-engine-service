@@ -1,12 +1,8 @@
-"""Single merged interviewer turn: classify, evaluate, and respond in one call.
+"""Two-stage candidate routing and live interviewer response handling.
 
-This node replaces the former three sequential LLM calls (classify -> evaluate ->
-generate). For an unambiguous clarification or silence it still answers instantly
-from templates with no model call. For everything else it makes ONE structured
-``InterviewerTurnResponse`` call that routes the utterance, judges the answer, and
-produces the next spoken question or clarification. The deterministic difficulty
-plan and section-timing decision are computed before the call so adaptive control
-stays fully deterministic while latency drops to a single round trip.
+High-confidence deterministic paths remain local. Other utterances first receive a
+small classification-only call. A second model call runs only when a substantial
+answer needs evaluation/question generation or a dynamic clarification is required.
 """
 
 from __future__ import annotations
@@ -16,7 +12,6 @@ import logging
 import time
 from typing import Any
 
-from src.config.settings import settings
 from src.control.agents.key_routing import active_turn_key_slot
 from src.control.agents.nodes.apply_question import apply_resolved_question
 from src.control.agents.nodes.classify_response import (
@@ -45,11 +40,17 @@ from src.control.agents.nodes.question_strategy import (
     section_expected_signals,
 )
 from src.control.agents.nodes.time_manager import decide_time_action
-from src.control.agents.prompts import INTERVIEWER_TURN_SYSTEM_PROMPT
+from src.control.agents.prompts import (
+    CLASSIFICATION_SYSTEM_PROMPT,
+    LIVE_INTERVIEWER_SYSTEM_PROMPT,
+)
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
 from src.core.services import llm_service
-from src.schemas.prompts import InterviewerTurnResponse
+from src.schemas.prompts import (
+    CandidateResponseClassification,
+    LiveInterviewerResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,65 +73,46 @@ def _self_intro_state_updates(state: InterviewState, text: str) -> dict[str, Any
     }
 
 
-def _should_finish_deterministically(det: dict[str, Any] | None) -> bool:
-    """Route silence, irrelevant, and regex-matched clarifications without an LLM call."""
-
-    if det is None:
-        return False
-    return det.get("response_type") in ("silence", "irrelevant", "clarification")
-
-
-def _safe_merged_fallback(
+def _should_finish_deterministically(
     det: dict[str, Any] | None,
-) -> InterviewerTurnResponse:
-    """Keep the interview on the current question when the merged LLM call fails."""
+) -> bool:
+    """Route trusted static cases without a classifier call."""
 
-    if det is not None:
-        response_type = str(det.get("response_type") or "")
-        if response_type == "irrelevant":
-            return InterviewerTurnResponse(
-                response_type="irrelevant",
-                clarification_type=None,
-                is_substantial=None,
-                answer_strength=None,
-                acknowledgement=None,
-                question_text=None,
-                topic=None,
-                clarification_response=None,
-            )
-        if response_type == "clarification":
-            return InterviewerTurnResponse(
-                response_type="clarification",
-                clarification_type=det.get("clarification_type"),
-                is_substantial=None,
-                answer_strength=None,
-                acknowledgement=None,
-                question_text=None,
-                topic=None,
-                clarification_response=None,
-            )
-        if response_type == "answer" and det.get("is_substantial") is False:
-            return InterviewerTurnResponse(
-                response_type="answer",
-                clarification_type=None,
-                is_substantial=False,
-                answer_strength=None,
-                acknowledgement=None,
-                question_text=None,
-                topic=None,
-                clarification_response=None,
-            )
+    return det is not None and det.get("response_type") in {
+        "silence",
+        "clarification",
+        "irrelevant",
+    }
 
-    return InterviewerTurnResponse(
+
+def _safe_classification_fallback(text: str) -> CandidateResponseClassification:
+    """Prefer a non-destructive answer route if the classifier is unavailable."""
+
+    return CandidateResponseClassification(
         response_type="answer",
         clarification_type=None,
-        is_substantial=False,
-        answer_strength=None,
-        acknowledgement=None,
-        question_text=None,
-        topic=None,
-        clarification_response=None,
+        is_substantial=_spoken_word_count(text) > 2,
+        interview_meta_type=None,
     )
+
+
+def _safe_live_fallback(
+    response_mode: str,
+    *,
+    is_technical_answer: bool,
+) -> LiveInterviewerResponse | None:
+    """Return a valid result that lets existing local fallbacks finish the turn."""
+
+    if response_mode == "answer":
+        return LiveInterviewerResponse(
+            response_mode="answer",
+            answer_strength="adequate" if is_technical_answer else None,
+            acknowledgement=None,
+            question_text=None,
+            topic=None,
+            clarification_response=None,
+        )
+    return None
 
 
 def _resolve_target(
@@ -171,16 +153,75 @@ def _difficulty_plan_for_target(
     )
 
 
-def _interviewer_messages(
+def _classification_messages(state: InterviewState) -> list[dict[str, str]]:
+    """Build the minimal classification-only request."""
+
+    context = {
+        "current_question": state.get("current_question_text") or "",
+        "candidate_response": state.get("previous_candidate_response") or "",
+        "section_kind": state.get("current_section_kind") or "technical",
+    }
+    return [
+        {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps(context, ensure_ascii=False, default=str),
+        },
+    ]
+
+
+def _response_mode(
+    classification: CandidateResponseClassification,
+) -> str | None:
+    """Map classification to the only stage-two modes that need model output."""
+
+    if classification.response_type == "answer" and classification.is_substantial:
+        return "answer"
+    if (
+        classification.response_type == "clarification"
+        and classification.clarification_type
+        in {
+            "question_doubt",
+            "rephrase_question",
+        }
+    ):
+        return classification.clarification_type
+    return None
+
+
+def _live_interviewer_messages(
     state: InterviewState,
     *,
+    classification: CandidateResponseClassification,
     target: dict[str, Any],
     decision: dict[str, Any],
     ask_next_question: bool,
     must_close: bool,
     plan: dict[str, dict[str, Any]] | None,
 ) -> list[dict[str, str]]:
-    """Assemble the single merged classify/evaluate/generate prompt context."""
+    """Assemble stage-two evaluation/question or clarification context."""
+
+    response_mode = _response_mode(classification)
+    if response_mode in {"question_doubt", "rephrase_question"}:
+        clarification_context = {
+            "response_mode": response_mode,
+            "current_question": state.get("current_question_text") or "",
+            "candidate_response": state.get("previous_candidate_response") or "",
+            "section_kind": state.get("current_section_kind") or "technical",
+            "current_technical_skill": state.get("current_technical_skill"),
+            "question_difficulty": state.get("current_question_difficulty"),
+        }
+        return [
+            {"role": "system", "content": LIVE_INTERVIEWER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    clarification_context,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+        ]
 
     is_behavioural = target["kind"] == "behavioural_cultural"
     transition = None
@@ -196,30 +237,24 @@ def _interviewer_messages(
 
     sequence_number = len(state.get("asked_questions") or []) + 1
     seed = str(state.get("question_variation_seed") or "")
-    total_mins = max(1, int(state.get("total_duration_secs") or 60) // 60)
-    elapsed_mins = max(0, int(state.get("elapsed_secs") or 0) // 60)
     context: dict[str, Any] = {
+        "response_mode": "answer",
         "section_kind": target["kind"],
+        "answer_section_kind": state.get("current_section_kind") or "technical",
+        "next_section_kind": target["kind"],
         "previous_candidate_response": state.get("previous_candidate_response") or "",
         "current_question": state.get("current_question_text") or "",
-        "is_self_introduction": is_self_intro_phase(state),
         "ask_next_question": ask_next_question,
         "must_close": must_close,
-        "is_section_start": bool(target["entering_new_section"]),
         "transition": transition,
         "follow_interesting_thread": follow_interesting_thread,
         "inferred_difficulty": state.get("inferred_difficulty"),
-        "elapsed_minutes": elapsed_mins,
-        "total_minutes": total_mins,
-        "question_variation_seed": state.get("question_variation_seed"),
-        "question_sequence_number": sequence_number,
         "question_framing_hint": framing_hint(seed, sequence_number),
         "recent_question_stems": recent_question_stems(state),
         "recent_acknowledgements": recent_acknowledgements(
             state,
             limit=_CONTEXT_HISTORY_LIMIT,
         ),
-        "filler_already_spoken": bool(settings.ENABLE_ACK_FILLER),
     }
 
     if is_behavioural:
@@ -260,7 +295,7 @@ def _interviewer_messages(
         )
 
     return [
-        {"role": "system", "content": INTERVIEWER_TURN_SYSTEM_PROMPT},
+        {"role": "system", "content": LIVE_INTERVIEWER_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": json.dumps(context, ensure_ascii=False, default=str),
@@ -275,8 +310,10 @@ def _classification_updates(
     clarification_type: str | None,
     is_substantial: bool | None,
     source: str,
+    interview_meta_type: str | None = None,
     question_doubt_response: str | None = None,
     latest_evaluation: dict[str, Any] | None = None,
+    evaluation_source: str | None = None,
 ) -> dict[str, Any]:
     """Build shared classification, violation, and candidate-turn updates."""
 
@@ -284,6 +321,7 @@ def _classification_updates(
         "response_type": response_type,
         "clarification_type": clarification_type,
         "is_substantial": is_substantial,
+        "interview_meta_type": interview_meta_type,
         "question_doubt_response": question_doubt_response,
     }
     resume_skill_match = clarification_type == "skip_question" and resume_has_skill(
@@ -315,7 +353,7 @@ def _classification_updates(
         metadata.update(
             {
                 "live_evaluation": latest_evaluation,
-                "evaluation_source": source,
+                "evaluation_source": evaluation_source or source,
             }
         )
     pending_candidate_turn.update(
@@ -381,21 +419,67 @@ def _finish_deterministic(
     }
 
 
-def _apply_result(
+def _finish_classification_only(
     state: InterviewState,
-    result: InterviewerTurnResponse,
-    decision: dict[str, Any],
-    target: dict[str, Any],
-    plan: dict[str, dict[str, Any]] | None,
+    classification: CandidateResponseClassification,
     source: str,
     started_at: float,
 ) -> dict[str, Any]:
-    """Translate one merged model response into deterministic graph state updates."""
+    """Commit a classification whose response is fully handled by templates."""
+
+    response_type = classification.response_type
+    clarification_type = classification.clarification_type
+    common_updates = _classification_updates(
+        state,
+        response_type=response_type,
+        clarification_type=clarification_type,
+        is_substantial=classification.is_substantial,
+        interview_meta_type=classification.interview_meta_type,
+        source=source,
+    )
+    silence_stage = state.get("silence_stage") or "none"
+    if clarification_type not in {"time_to_think", "decline_think_time"}:
+        silence_stage = "none"
+
+    logger.info(
+        "Candidate response resolved after classification",
+        extra={
+            "candidate_assessment_id": state.get("candidate_assessment_id"),
+            "response_type": response_type,
+            "clarification_type": clarification_type,
+            "interview_meta_type": classification.interview_meta_type,
+            "classification_source": source,
+            "stage_two_skipped": True,
+            "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        },
+    )
+    return {
+        **common_updates,
+        "pregenerated_closing_lead": None,
+        "pending_clarification_text": None,
+        "silence_stage": silence_stage,
+        "next_action": "generate_bot_response",
+    }
+
+
+def _apply_result(
+    state: InterviewState,
+    classification: CandidateResponseClassification,
+    result: LiveInterviewerResponse | None,
+    decision: dict[str, Any],
+    target: dict[str, Any],
+    plan: dict[str, dict[str, Any]] | None,
+    classification_source: str,
+    response_source: str | None,
+    started_at: float,
+) -> dict[str, Any]:
+    """Translate classified stage-two output into deterministic graph updates."""
 
     text = str(state.get("previous_candidate_response") or "")
-    response_type = result.response_type
-    clarification_type = result.clarification_type
-    is_substantial = result.is_substantial
+    response_type = classification.response_type
+    clarification_type = classification.clarification_type
+    is_substantial = classification.is_substantial
+    answer_strength = result.answer_strength if result is not None else None
 
     if response_type == "answer" and is_self_intro_phase(state):
         # The self-introduction elaboration rule uses cumulative spoken words.
@@ -403,7 +487,7 @@ def _apply_result(
     elif (
         response_type == "answer"
         and state.get("current_section_kind") == "behavioural_cultural"
-        and is_deterministic_classification_source(source)
+        and is_deterministic_classification_source(classification_source)
     ):
         word_count = _spoken_word_count(text)
         if word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD:
@@ -418,9 +502,9 @@ def _apply_result(
         response_type == "answer"
         and is_substantial
         and state.get("current_section_kind") == "technical"
-        and result.answer_strength
+        and answer_strength
     ):
-        latest_evaluation = {"strength": result.answer_strength}
+        latest_evaluation = {"strength": answer_strength}
         if state.get("current_technical_skill"):
             key = str(state["current_technical_skill"]).casefold()
             current = dict(
@@ -429,7 +513,7 @@ def _apply_result(
             for strength in ("weak", "adequate", "strong"):
                 current[strength] = (
                     int(current.get(strength) or 0) + 1
-                    if strength == result.answer_strength
+                    if strength == answer_strength
                     else 0
                 )
             skill_streaks[key] = current
@@ -440,39 +524,39 @@ def _apply_result(
             response_type=response_type,
             clarification_type=clarification_type,
             is_substantial=is_substantial,
-            source=source,
+            interview_meta_type=classification.interview_meta_type,
+            source=classification_source,
             question_doubt_response=(
                 result.clarification_response
-                if clarification_type == "question_doubt"
+                if clarification_type == "question_doubt" and result is not None
                 else None
             ),
             latest_evaluation=latest_evaluation,
+            evaluation_source=response_source,
         ),
         "skill_evaluation_streaks": skill_streaks,
         "pregenerated_closing_lead": None,
         "pending_clarification_text": None,
-        "speculative_interviewer_result": None,
         **_self_intro_state_updates(state, text),
     }
 
     logger.info(
-        "Interviewer turn resolved by merged model",
+        "Interviewer turn resolved after staged processing",
         extra={
             "candidate_assessment_id": state.get("candidate_assessment_id"),
             "response_type": response_type,
             "is_substantial": is_substantial,
-            "answer_strength": result.answer_strength,
+            "answer_strength": answer_strength,
             "time_action": decision["action"],
-            "classification_source": source,
+            "classification_source": classification_source,
+            "response_source": response_source,
             "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
         },
     )
 
     forced_behavioural_preface = None
     if decision.get("transition_reason") == "behavioural_time_rescue":
-        forced_behavioural_preface = (
-            "Due to lack of time lets move to the behavioural section."
-        )
+        forced_behavioural_preface = choose_template("behavioural_forced_transition")
 
     intro_transition_preface = None
     if (
@@ -494,7 +578,7 @@ def _apply_result(
         )
 
         if decision["action"] == "close":
-            lead = str(result.acknowledgement or "").strip()
+            lead = str(result.acknowledgement or "").strip() if result else ""
             return {
                 **base,
                 **decision["timing_updates"],
@@ -507,19 +591,19 @@ def _apply_result(
                 "next_action": "generate_closing",
             }
 
-        question_text = str(result.question_text or "").strip()
+        question_text = str(result.question_text or "").strip() if result else ""
         resolved_question: dict[str, Any] | None = None
         if question_text:
             acknowledgement = str(result.acknowledgement or "").strip()
             if forced_behavioural_preface:
                 acknowledgement = forced_behavioural_preface
-            elif is_deterministic_classification_source(source):
+            elif response_source is None:
                 acknowledgement = ""
             topic = str(result.topic or "").strip()
             if target["kind"] == "technical":
                 strength_key = (
-                    result.answer_strength
-                    if (plan and result.answer_strength in plan)
+                    answer_strength
+                    if (plan and answer_strength in plan)
                     else "adequate"
                 )
                 chosen = (plan or {}).get(strength_key) or {
@@ -653,6 +737,8 @@ def _apply_result(
     }:
         pending_clarification_text = (
             str(result.clarification_response or "").strip() or None
+            if result is not None
+            else None
         )
 
     silence_stage = state.get("silence_stage") or "none"
@@ -667,22 +753,30 @@ def _apply_result(
     }
 
 
+def _validate_live_response(
+    classification: CandidateResponseClassification,
+    state: InterviewState,
+    result: LiveInterviewerResponse,
+) -> None:
+    """Reject a stage-two response that contradicts its fixed routing mode."""
+
+    expected_mode = _response_mode(classification)
+    if result.response_mode != expected_mode:
+        raise ValueError(
+            f"stage-two mode {result.response_mode!r} does not match "
+            f"classification mode {expected_mode!r}"
+        )
+    if expected_mode != "answer":
+        return
+    is_technical = state.get("current_section_kind") == "technical"
+    if is_technical and result.answer_strength is None:
+        raise ValueError("technical answer requires answer_strength")
+    if not is_technical and result.answer_strength is not None:
+        raise ValueError("non-technical answer requires answer_strength=null")
+
+
 async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
-    """
-    Classify, evaluate, and respond to one candidate utterance in a single pass.
-
-    Unambiguous silence and short clarifications are answered instantly from
-    templates. Everything else uses one merged structured call that routes the
-    utterance and, when it is a substantial answer, produces the next question at a
-    deterministically planned difficulty and section.
-
-    Args:
-        state: The current interview state.
-
-    Returns:
-        State updates with classification, optional staged question/closing lead,
-        violations, and the routing key ``next_action``.
-    """
+    """Classify first, then conditionally evaluate and generate a live response."""
 
     started_at = time.perf_counter()
     text = str(state.get("previous_candidate_response") or "")
@@ -692,28 +786,25 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
         return _finish_deterministic(state, det, started_at)
 
     if is_self_intro_phase(state):
-        # Self-intro routing is fully deterministic: avoid LLM misclassification
-        # and use cumulative spoken-word count to determine substantiality.
-        deterministic_result = InterviewerTurnResponse(
+        # Preserve the existing cumulative-word deterministic introduction rule.
+        deterministic_classification = CandidateResponseClassification(
             response_type="answer",
             clarification_type=None,
             is_substantial=self_intro_is_substantial(state, text),
-            answer_strength=None,
-            acknowledgement=None,
-            question_text=None,
-            topic=None,
-            clarification_response=None,
+            interview_meta_type=None,
         )
         decision = decide_time_action(state)
         target = _resolve_target(state, decision)
         plan = _difficulty_plan_for_target(state, target)
         return _apply_result(
             state,
-            deterministic_result,
+            deterministic_classification,
+            None,
             decision,
             target,
             plan,
             "deterministic_self_intro",
+            None,
             started_at,
         )
 
@@ -722,25 +813,52 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
         state.get("current_section_kind") == "behavioural_cultural"
         and word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD
     ):
-        deterministic_result = InterviewerTurnResponse(
+        # Preserve the existing behavioural word-count fast path.
+        deterministic_classification = CandidateResponseClassification(
             response_type="answer",
             clarification_type=None,
             is_substantial=(word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD),
-            answer_strength=None,
-            acknowledgement=None,
-            question_text=None,
-            topic=None,
-            clarification_response=None,
+            interview_meta_type=None,
         )
         decision = decide_time_action(state)
         target = _resolve_target(state, decision)
         return _apply_result(
             state,
-            deterministic_result,
+            deterministic_classification,
+            None,
             decision,
             target,
             None,
             "deterministic_behavioural",
+            None,
+            started_at,
+        )
+
+    classification: CandidateResponseClassification | None = None
+    classification_source = "llm"
+    try:
+        classification = await llm_service.classify(
+            _classification_messages(state),
+            CandidateResponseClassification,
+            key_slot=active_turn_key_slot(state),
+        )
+    except Exception:
+        logger.exception(
+            "Candidate-response classification failed; using safe fallback",
+            extra={
+                "candidate_assessment_id": state.get("candidate_assessment_id"),
+                "question_id": state.get("current_question_id"),
+            },
+        )
+        classification = _safe_classification_fallback(text)
+        classification_source = "validated_fallback"
+
+    response_mode = _response_mode(classification)
+    if response_mode is None:
+        return _finish_classification_only(
+            state,
+            classification,
+            classification_source,
             started_at,
         )
 
@@ -750,62 +868,47 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
     ask_next_question = not must_close
     plan = _difficulty_plan_for_target(state, target)
 
-    cached_raw = state.get("speculative_interviewer_result")
-    if cached_raw:
-        try:
-            cached_result = InterviewerTurnResponse(**cached_raw)
-            return _apply_result(
-                state,
-                cached_result,
-                decision,
-                target,
-                plan,
-                "speculative_cache",
-                started_at,
-            )
-        except Exception:
-            logger.warning(
-                "Speculative interviewer cache unusable; calling model",
-                exc_info=True,
-                extra={
-                    "candidate_assessment_id": state.get("candidate_assessment_id"),
-                },
-            )
-
-    messages = _interviewer_messages(
+    response_source = "llm"
+    messages = _live_interviewer_messages(
         state,
+        classification=classification,
         target=target,
         decision=decision,
         ask_next_question=ask_next_question,
         must_close=must_close,
         plan=plan,
     )
-
-    source = "llm"
+    result: LiveInterviewerResponse | None
     try:
         result = await llm_service.respond(
             messages,
-            InterviewerTurnResponse,
+            LiveInterviewerResponse,
             key_slot=active_turn_key_slot(state),
         )
+        _validate_live_response(classification, state, result)
     except Exception:
         logger.exception(
-            "Merged interviewer-turn call failed; using safe fallback",
+            "Live evaluation/interviewer call failed; using local fallback",
             extra={
                 "candidate_assessment_id": state.get("candidate_assessment_id"),
                 "question_id": state.get("current_question_id"),
+                "response_mode": response_mode,
             },
         )
-        # Keep the interview on the current question when the model is unavailable.
-        result = _safe_merged_fallback(det)
-        source = "safe_fallback"
+        result = _safe_live_fallback(
+            response_mode,
+            is_technical_answer=(state.get("current_section_kind") == "technical"),
+        )
+        response_source = "validated_fallback"
 
     return _apply_result(
         state,
+        classification,
         result,
         decision,
         target,
         plan,
-        source,
+        classification_source,
+        response_source,
         started_at,
     )

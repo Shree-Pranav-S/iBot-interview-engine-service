@@ -31,11 +31,9 @@ class Settings(BaseSettings):
     TURN_ENDPOINTING_MIN_DELAY_SECS: float = 0.5
     TURN_ENDPOINTING_MAX_DELAY_SECS: float = 2.0
     FALSE_INTERRUPTION_TIMEOUT_SECS: float = 1.2
-    # Speak an instant, content-neutral acknowledgement while the merged
-    # interviewer call runs so the candidate hears a reply with no dead air.
+    # Speak an instant, content-neutral acknowledgement while live turn reasoning
+    # runs so the candidate hears a reply with no dead air.
     ENABLE_ACK_FILLER: bool = True
-    # Start merged LLM reasoning before turn confirmation (custom llm_node wiring).
-    PREEMPTIVE_GENERATION_ENABLED: bool = False
 
     # Groq models used by latency-sensitive graph nodes.
     # Existing healthy source variables are retained so local development can
@@ -53,13 +51,15 @@ class Settings(BaseSettings):
     GROQ_QUESTION_MAX_TOKENS: int = 256
     GROQ_QUESTION_TEMPERATURE: float = 0.15
     GROQ_QUESTION_TIMEOUT_SECS: float = 10.0
-    # Single merged "interviewer turn" call: classify + evaluate + generate.
-    # Reuses the question-generation API keys (same operational purpose).
+    # Stage-two live evaluation and interviewer response generation.
     GROQ_INTERVIEWER_MODEL: str = "openai/gpt-oss-120b"
     GROQ_INTERVIEWER_MAX_TOKENS: int = 520
     GROQ_INTERVIEWER_TEMPERATURE: float = 0.28
     GROQ_INTERVIEWER_TIMEOUT_SECS: float = 12.0
+    # Stage-one classification is deliberately small, strict, and low variance.
     GROQ_CLASSIFY_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_CLASSIFY_MAX_TOKENS: int = 128
+    GROQ_CLASSIFY_TEMPERATURE: float = 0.0
     GROQ_CLASSIFY_TIMEOUT_SECS: float = 5.0
     GROQ_REASONING_EFFORT: Literal["low", "medium", "high"] = "low"
     GROQ_KEY_RATE_LIMIT_COOLDOWN_SECS: float = 60.0

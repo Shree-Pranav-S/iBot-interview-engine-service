@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -16,19 +15,13 @@ from src.control.agents.graphs import get_graph
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
 )
-from src.control.agents.nodes.question_strategy import is_self_intro_phase
-from src.control.agents.nodes.speculative_interviewer import (
-    SpeculativeCacheEntry,
-    cache_matches_final,
-    warm_speculative_interviewer_turn,
-)
 from src.control.agents.nodes.time_manager import (
     FORCE_BEHAVIOURAL_REMAINING_SECS,
     SECTION_BARGE_IN_GRACE_SECS,
     section_transition_deadline_elapsed,
 )
 from src.control.agents.state import InterviewState
-from src.core.services.candidate_session_service import CandidateSessionService
+from src.core.services.core_api_session_service import CoreApiSessionService
 from src.core.services.event_log_service import (
     try_record_event_in_background,
 )
@@ -37,6 +30,19 @@ from src.utils.interview_graph import utc_now_iso
 
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {"COMPLETED", "TERMINATED", "DEACTIVATED", "EVALUATED"}
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    """Parse trusted Core API datetime values returned as objects or ISO strings."""
+
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class LiveKitInterviewBridge:
@@ -58,8 +64,6 @@ class LiveKitInterviewBridge:
         self._config = {"configurable": {"thread_id": self.candidate_assessment_id}}
         self._timer_started_monotonic: float | None = None
         self._elapsed_before_connection_secs = 0
-        self._speculative_cache: SpeculativeCacheEntry | None = None
-        self._speculative_warm_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _is_terminal(state: dict[str, Any]) -> bool:
@@ -117,8 +121,8 @@ class LiveKitInterviewBridge:
                 0,
                 int(session.get("total_elapsed_secs") or 0),
             )
-            started_at = context.get("interview_started_at")
-            if isinstance(started_at, datetime):
+            started_at = _coerce_datetime(context.get("interview_started_at"))
+            if started_at is not None:
                 self._timer_started_monotonic = time.monotonic()
                 self.state["timer_started"] = True
                 self.state["timer_started_at"] = started_at.isoformat()
@@ -195,8 +199,13 @@ class LiveKitInterviewBridge:
 
     def seconds_until_section_barge_in(self) -> float | None:
         """
-        Return delay to the grace deadline without stealing later sections.
-        This is used to determine when the agent should forcefully move on.
+        Return delay to the earliest mandatory timing boundary.
+
+        The watchdog honors section grace, reserves the final twenty seconds for a
+        pending behavioural section, and allows a response to finish naturally at
+        total time before enforcing the thirty-second overtime cap. Self-introduction
+        is never section-barged; its completed substantial turn performs the
+        transition instead.
 
         Returns:
             The number of seconds until a barge-in should occur, or None if inapplicable.
@@ -210,29 +219,34 @@ class LiveKitInterviewBridge:
             or self._is_terminal(state)
         ):
             return None
-        budget = int(state.get("current_section_budget_secs") or 0)
-        if budget <= 0:
-            return None
-        deadline_elapsed = section_transition_deadline_elapsed(
-            cast(InterviewState, state),
-            grace_secs=SECTION_BARGE_IN_GRACE_SECS,
-        )
         elapsed = self.elapsed_secs()
-        section_delay = max(0.0, float(deadline_elapsed - elapsed))
+        total_duration = max(1, int(state.get("total_duration_secs") or 1))
+        forced_close_elapsed = total_duration + SECTION_BARGE_IN_GRACE_SECS
+        delays = [max(0.0, float(forced_close_elapsed - elapsed))]
+        is_self_intro = state.get("current_section_kind") == "self_intro"
+
+        budget = int(state.get("current_section_budget_secs") or 0)
+        if budget > 0 and not is_self_intro:
+            deadline_elapsed = section_transition_deadline_elapsed(
+                cast(InterviewState, state),
+                grace_secs=SECTION_BARGE_IN_GRACE_SECS,
+            )
+            delays.append(max(0.0, float(deadline_elapsed - elapsed)))
+
         current_index = int(state.get("current_section_index") or 0)
         behavioural_pending = any(
             index > current_index
             and section.get("section_kind") == "behavioural_cultural"
             for index, section in enumerate(list(state.get("runtime_sections") or []))
         )
-        if not behavioural_pending:
-            return section_delay
-        total_duration = max(1, int(state.get("total_duration_secs") or 1))
-        rescue_delay = max(
-            0.0,
-            float(total_duration - elapsed - FORCE_BEHAVIOURAL_REMAINING_SECS),
-        )
-        return min(section_delay, rescue_delay)
+        if behavioural_pending and not is_self_intro:
+            delays.append(
+                max(
+                    0.0,
+                    float(total_duration - elapsed - FORCE_BEHAVIOURAL_REMAINING_SECS),
+                )
+            )
+        return min(delays)
 
     def _merge_result(self, result: Any) -> None:
         """
@@ -247,64 +261,6 @@ class LiveKitInterviewBridge:
             "timer_started_at": previous.get("timer_started_at"),
         }
         self.state = {**dict(result or {}), **timer_state}
-
-    def _cancel_speculative_warm(self) -> None:
-        task = self._speculative_warm_task
-        if task and not task.done():
-            task.cancel()
-        self._speculative_warm_task = None
-
-    async def warm_speculative_turn(self, text: str) -> None:
-        """
-        Pre-compute the merged interviewer call before LiveKit confirms EOT.
-
-        Does not resume LangGraph; results are cached for the final turn submit.
-        """
-
-        state = await self._ensure_state()
-        if not state or self._is_terminal(state):
-            return
-        if state.get("phase_complete"):
-            return
-        if is_self_intro_phase(state):
-            return
-
-        self._cancel_speculative_warm()
-
-        async def _run() -> None:
-            try:
-                entry = await warm_speculative_interviewer_turn(
-                    self.state or {},
-                    text,
-                )
-                if entry is not None:
-                    self._speculative_cache = entry
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "Speculative interviewer warmup failed",
-                    exc_info=True,
-                    extra={
-                        "candidate_assessment_id": self.candidate_assessment_id,
-                    },
-                )
-
-        self._speculative_warm_task = asyncio.create_task(_run())
-
-    def _take_speculative_result(self, final_text: str) -> dict[str, Any] | None:
-        """Return a cached merged result when it matches the final transcript."""
-
-        self._cancel_speculative_warm()
-        entry = self._speculative_cache
-        self._speculative_cache = None
-        if entry is None or not cache_matches_final(
-            entry,
-            final_text,
-            self.state or {},
-        ):
-            return None
-        return dict(entry.result)
 
     async def submit_candidate_turn(
         self,
@@ -342,9 +298,6 @@ class LiveKitInterviewBridge:
             "elapsed_secs": self.elapsed_secs(),
             "received_at": utc_now_iso(),
         }
-        speculative = self._take_speculative_result(text)
-        if speculative is not None:
-            event["speculative_interviewer_result"] = speculative
         result = await graph.ainvoke(
             Command(resume=event),
             config=self._config,
@@ -488,7 +441,7 @@ class LiveKitInterviewBridge:
                 },
             )
             return
-        await CandidateSessionService().record_disconnect(
+        await CoreApiSessionService().record_disconnect(
             session_id=uuid.UUID(self.interview_session_id),
             connection_id=self.connection_id,
             candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),

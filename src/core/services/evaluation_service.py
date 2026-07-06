@@ -7,12 +7,12 @@ import uuid
 from typing import Any
 
 from src.clients.core_api_client import get_core_api_client
-from src.core.services.evaluation_context_builder import (
-    build_evaluation_context,
-)
-from src.core.services.evaluation_errors import (
+from src.core.exceptions.evaluation import (
     EvaluationNotReadyError,
     PermanentEvaluationError,
+)
+from src.core.services.evaluation_context_builder import (
+    build_evaluation_context,
 )
 from src.core.services.evaluation_llm_client import (
     run_nvidia_holistic_evaluation,

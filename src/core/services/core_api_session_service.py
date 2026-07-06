@@ -1,4 +1,4 @@
-"""Two-token candidate entry and bounded LiveKit reconnection lifecycle."""
+"""Delegates candidate session lifecycle calls to core-api-service."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from src.schemas.livekit import (
 )
 
 
-class CandidateSessionService:
-    """Delegates session lifecycle persistence to core-api-service."""
+class CoreApiSessionService:
+    """HTTP facade for core-api /internal/interview session routes."""
 
     def __init__(
         self,

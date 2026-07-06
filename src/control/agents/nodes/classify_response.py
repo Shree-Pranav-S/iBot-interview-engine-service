@@ -88,61 +88,6 @@ IRRELEVANT_TOPIC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-CONTENT_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:[+#.-][a-z0-9]+)*")
-CLASSIFICATION_STOP_WORDS = frozenset(
-    {
-        "a",
-        "about",
-        "also",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "by",
-        "can",
-        "could",
-        "describe",
-        "did",
-        "do",
-        "does",
-        "explain",
-        "for",
-        "from",
-        "give",
-        "how",
-        "i",
-        "in",
-        "into",
-        "is",
-        "it",
-        "me",
-        "of",
-        "on",
-        "or",
-        "please",
-        "tell",
-        "that",
-        "the",
-        "their",
-        "this",
-        "to",
-        "use",
-        "using",
-        "was",
-        "what",
-        "when",
-        "which",
-        "why",
-        "will",
-        "with",
-        "would",
-        "you",
-        "your",
-    }
-)
-
 
 def _spoken_word_count(text: str) -> int:
     """Count spoken words using the same technical-token rules as classification."""
@@ -174,7 +119,7 @@ def self_intro_is_substantial(state: InterviewState, text: str) -> bool:
 
 
 def is_deterministic_classification_source(source: str | None) -> bool:
-    """Return True when a turn was classified without the merged interviewer LLM."""
+    """Return True when a turn was classified without the classifier LLM."""
 
     return str(source or "") in DETERMINISTIC_CLASSIFICATION_SOURCES
 
@@ -193,11 +138,11 @@ def will_bypass_interviewer_llm(state: InterviewState, text: str) -> bool:
     """Mirror interviewer_turn pre-LLM routing for filler suppression."""
 
     det = _deterministic_classification(state, text)
-    if det is not None and det.get("response_type") in (
+    if det is not None and det.get("response_type") in {
         "silence",
-        "irrelevant",
         "clarification",
-    ):
+        "irrelevant",
+    }:
         return True
     if is_self_intro_phase(state):
         return True
@@ -206,35 +151,6 @@ def will_bypass_interviewer_llm(state: InterviewState, text: str) -> bool:
         state.get("current_section_kind") == "behavioural_cultural"
         and word_count > BEHAVIOURAL_ANSWER_WORD_THRESHOLD
     )
-
-
-def _content_tokens(text: str) -> set[str]:
-    """Return meaningful lowercase tokens for conservative relevance matching."""
-
-    return {
-        token
-        for token in CONTENT_TOKEN_PATTERN.findall(text.casefold())
-        if len(token) > 1 and token not in CLASSIFICATION_STOP_WORDS
-    }
-
-
-def _is_clear_relevant_answer(state: InterviewState, text: str) -> bool:
-    """
-    Recognize only high-confidence answer attempts without an LLM round trip.
-
-    Two meaningful terms shared with the active question are enough to establish
-    relevance for a developed spoken response. Question-like utterances remain
-    model-classified so genuine scope doubts are not mistaken for answers.
-    """
-
-    if _spoken_word_count(text) < 10:
-        return False
-    if text.rstrip().endswith("?") or QUESTION_LIKE_ANSWER_PATTERN.search(text):
-        return False
-
-    question_tokens = _content_tokens(str(state.get("current_question_text") or ""))
-    response_tokens = _content_tokens(text)
-    return len(question_tokens & response_tokens) >= 2
 
 
 def _result(
@@ -262,26 +178,6 @@ def _result(
         "is_substantial": is_substantial,
         "question_doubt_response": question_doubt_response,
     }
-
-
-def _is_likely_irrelevant(state: InterviewState, text: str) -> bool:
-    """Conservative off-topic detection before an LLM round trip."""
-
-    if IRRELEVANT_TOPIC_PATTERN.search(text):
-        return True
-    word_count = _spoken_word_count(text)
-    if word_count <= 2:
-        return False
-    question_tokens = _content_tokens(str(state.get("current_question_text") or ""))
-    response_tokens = _content_tokens(text)
-    if not question_tokens or not response_tokens:
-        return False
-    overlap = len(question_tokens & response_tokens)
-    if word_count >= 8 and overlap == 0:
-        return True
-    return (
-        word_count >= 12 and overlap <= 1 and not _is_clear_relevant_answer(state, text)
-    )
 
 
 def _deterministic_classification(
@@ -369,13 +265,7 @@ def _deterministic_classification(
                 clarification_type=None,
                 is_substantial=(word_count > BEHAVIOURAL_SUBSTANTIAL_WORD_THRESHOLD),
             )
-    if _is_clear_relevant_answer(state, text):
-        return _result(
-            response_type="answer",
-            clarification_type=None,
-            is_substantial=True,
-        )
-    if _is_likely_irrelevant(state, text):
+    if IRRELEVANT_TOPIC_PATTERN.search(text):
         return _result(
             response_type="irrelevant",
             clarification_type=None,
