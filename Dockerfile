@@ -1,26 +1,36 @@
-FROM python:3.11-slim
+# Stage 1: Builder
+FROM python:3.11-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /uvx /bin/
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PORT=8001
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY uv.lock ./
+COPY pyproject.toml uv.lock ./
 
-RUN uv export \
+RUN uv venv /app/.venv \
+    && uv export \
         --frozen \
         --no-dev \
         --no-emit-project \
         --output-file /tmp/requirements.txt \
-    && uv pip install \
-        --system \
+    && VIRTUAL_ENV=/app/.venv uv pip install \
+        --no-cache \
         --requirements /tmp/requirements.txt
+
+# Stage 2: Runtime
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8001 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv ./.venv
 
 COPY src ./src
 RUN useradd --create-home --uid 10001 appuser

@@ -62,3 +62,4 @@ disable_error_code = ["no-any-return", "union-attr", "type-arg", "no-untyped-def
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
