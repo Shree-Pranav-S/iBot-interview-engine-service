@@ -87,12 +87,114 @@ IRRELEVANT_TOPIC_PATTERN = re.compile(
     r"tell me the answer|give me the answer|what is the correct answer)\b",
     re.IGNORECASE,
 )
+TECHNICAL_ANSWER_SIGNAL_PATTERN = re.compile(
+    r"\b(?:"
+    r"api|algorithm|async|cache|class|code|connection|cpu|database|db|"
+    r"deadlock|debug|diagnos(?:e|ed|ing|is|tic)|docker|endpoint|exception|"
+    r"framework|function|gil|hash|index|latency|lock(?:ed|ing|s)?|"
+    r"memory|mutex(?:es)?|object|postgres(?:ql)?|process|production|"
+    r"python|quer(?:y|ies)|queue|redis|request|response|schema|server|"
+    r"sql|thread(?:ed|ing|s)?|transaction(?:al|s)?|worker"
+    r")\b",
+    re.IGNORECASE,
+)
+QUESTION_KEYWORD_STOPWORDS = frozenset(
+    {
+        "about",
+        "after",
+        "again",
+        "answer",
+        "asked",
+        "causing",
+        "could",
+        "describe",
+        "does",
+        "from",
+        "have",
+        "into",
+        "interview",
+        "question",
+        "should",
+        "take",
+        "tell",
+        "that",
+        "their",
+        "there",
+        "this",
+        "what",
+        "when",
+        "where",
+        "which",
+        "with",
+        "would",
+        "your",
+    }
+)
 
 
 def _spoken_word_count(text: str) -> int:
     """Count spoken words using the same technical-token rules as classification."""
 
     return len(re.findall(r"\b[\w+#.-]+\b", text))
+
+
+def _keyword_tokens(text: str) -> set[str]:
+    """Return content-bearing tokens for loose question/answer overlap checks."""
+
+    return {
+        token.casefold()
+        for token in re.findall(r"\b[\w+#.-]+\b", text)
+        if len(token) >= 4 and token.casefold() not in QUESTION_KEYWORD_STOPWORDS
+    }
+
+
+def _has_loose_token_overlap(question: str, response: str) -> bool:
+    """Allow simple morphology such as deadlock/lock when judging topicality."""
+
+    question_tokens = _keyword_tokens(question)
+    response_tokens = _keyword_tokens(response)
+    for question_token in question_tokens:
+        for response_token in response_tokens:
+            if question_token == response_token:
+                return True
+            if min(len(question_token), len(response_token)) < 4:
+                continue
+            if question_token in response_token or response_token in question_token:
+                return True
+    return False
+
+
+def technical_answer_signal_is_present(state: InterviewState, text: str) -> bool:
+    """
+    Detect weak but topical technical answer attempts that must not be violations.
+
+    This intentionally does not grade correctness. It only protects routing when a
+    candidate uses technical vocabulary or overlaps with the active question.
+    """
+
+    normalized = " ".join(str(text or "").split())
+    if state.get("current_section_kind") != "technical":
+        return False
+    if _spoken_word_count(normalized) < 6:
+        return False
+    if IRRELEVANT_TOPIC_PATTERN.search(normalized):
+        return False
+    if normalized.rstrip().endswith("?") or QUESTION_LIKE_ANSWER_PATTERN.search(
+        normalized
+    ):
+        return False
+
+    question = str(state.get("current_question_text") or "")
+    current_skill = str(state.get("current_technical_skill") or "").strip()
+    if current_skill and re.search(
+        rf"\b{re.escape(current_skill)}\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(TECHNICAL_ANSWER_SIGNAL_PATTERN.search(normalized)) or (
+        bool(question) and _has_loose_token_overlap(question, normalized)
+    )
 
 
 def _self_intro_combined_text(state: InterviewState, text: str) -> str:

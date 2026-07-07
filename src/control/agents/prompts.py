@@ -318,6 +318,12 @@ CRITICAL CONTRASTS
   despite severe speech-to-text corruption.
 - For that same GIL question, "My favorite movie is a comedy and I watched it last
   weekend." => irrelevant because it has no plausible connection to the question.
+- Question: "What steps would you take to diagnose a deadlock causing queries to
+  hang in a production database?"
+  Response: "I would look at locking, mutexes, shared locks, and possible deadlock
+  algorithms."
+  => answer, is_substantial=true. It is weak and may mix concepts, but it engages
+  the deadlock and locking topic.
 - "I have no idea; please skip it." => clarification / skip_question.
 - "Does the question mean cycles between two objects only?" =>
   clarification / question_doubt.

@@ -291,6 +291,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._committed_user_transcript = ""
         self._current_user_interim = ""
         self._closing_finalize_requested = False
+        self._closing_playout_pending = False
         self._turn_lock = asyncio.Lock()
         self._recent_fillers: list[str] = []
 
@@ -572,7 +573,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             if not self._interview_closed and not self._awaiting_agent_reply:
                 self._schedule_delayed_silence(USER_AWAY_TIMEOUT_SECS)
             if self._interview_closed:
-                if not self._closing_finalize_requested:
+                if (
+                    not self._closing_finalize_requested
+                    and not self._closing_playout_pending
+                ):
                     asyncio.create_task(self._finalize_after_closing())
             elif not self._barge_in_active:
                 self._schedule_section_barge_watchdog()
@@ -1118,6 +1122,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 # frame so the final statement cannot be interrupted.
                 self.session.input.set_audio_enabled(False)
                 await self._publish_interview_closing_signal()
+                # Prevent track_agent_state from triggering premature
+                # finalization while closing chunks are still being yielded
+                # to the TTS pipeline.
+                self._closing_playout_pending = True
             elif (
                 str((self.bridge.state or {}).get("bot_reply_type") or "")
                 == SELF_INTRO_TRANSITION_REPLY_TYPE
@@ -1127,6 +1135,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             for chunk in chunk_for_tts(reply_text):
                 yield chunk
         finally:
+            self._closing_playout_pending = False
             self._awaiting_agent_reply = False
 
 

@@ -23,6 +23,7 @@ from src.control.agents.nodes.classify_response import (
     _turn_violations,
     is_deterministic_classification_source,
     self_intro_is_substantial,
+    technical_answer_signal_is_present,
 )
 from src.control.agents.nodes.persist_turn import schedule_elapsed_persistence
 from src.control.agents.nodes.question_diversity import (
@@ -92,6 +93,26 @@ def _safe_classification_fallback(text: str) -> CandidateResponseClassification:
         response_type="answer",
         clarification_type=None,
         is_substantial=_spoken_word_count(text) > 2,
+        interview_meta_type=None,
+    )
+
+
+def _guard_against_overstrict_irrelevance(
+    state: InterviewState,
+    text: str,
+    classification: CandidateResponseClassification,
+) -> CandidateResponseClassification:
+    """Promote topical technical attempts that the small classifier rejected."""
+
+    if (
+        classification.response_type != "irrelevant"
+        or not technical_answer_signal_is_present(state, text)
+    ):
+        return classification
+    return CandidateResponseClassification(
+        response_type="answer",
+        clarification_type=None,
+        is_substantial=_spoken_word_count(text) >= 10,
         interview_meta_type=None,
     )
 
@@ -842,6 +863,21 @@ async def interviewer_turn(state: InterviewState) -> dict[str, Any]:
             CandidateResponseClassification,
             key_slot=active_turn_key_slot(state),
         )
+        guarded = _guard_against_overstrict_irrelevance(
+            state,
+            text,
+            classification,
+        )
+        if guarded is not classification:
+            logger.info(
+                "Promoted topical technical response from irrelevant to answer",
+                extra={
+                    "candidate_assessment_id": state.get("candidate_assessment_id"),
+                    "question_id": state.get("current_question_id"),
+                },
+            )
+            classification = guarded
+            classification_source = "llm_technical_relevance_guard"
     except Exception:
         logger.exception(
             "Candidate-response classification failed; using safe fallback",
