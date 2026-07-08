@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from src.control.agents.nodes.question_strategy import is_self_intro_phase
 from src.control.agents.state import InterviewState
+from src.control.agents.utils.question_strategy import is_self_intro_phase
 from src.utils.interview_graph import deterministic_violation_id, utc_now_iso
 
 REPEAT_PATTERN = re.compile(

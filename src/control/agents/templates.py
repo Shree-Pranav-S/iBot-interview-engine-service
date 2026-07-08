@@ -9,6 +9,8 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from src.core.exceptions.interview import InterviewConfigurationException
+
 OPENING = (
     "Hello {candidate_name}, welcome to your interview with {company_name}. To begin, could you tell me about your professional background?",
     "Hi {candidate_name}, thank you for joining the {company_name} interview. Let us start with an overview of your professional background.",
@@ -526,7 +528,7 @@ _BANKS = {
 }
 
 if any(len(bank) < 10 for bank in _BANKS.values()):
-    raise RuntimeError(
+    raise InterviewConfigurationException(
         "Every interview static template bank must have at least 10 variants"
     )
 

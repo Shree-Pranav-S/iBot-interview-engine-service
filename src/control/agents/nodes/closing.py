@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.state import InterviewState
 from src.control.agents.templates import choose_template
+from src.control.agents.utils.turn_utils import build_bot_turn
 
 
 def generate_closing_message(state: InterviewState) -> dict[str, Any]:

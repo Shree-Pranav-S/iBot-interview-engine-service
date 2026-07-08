@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
 
+from src.api.rest.dependencies import (
+    get_core_api_session_service,
+    get_livekit_token_service,
+)
 from src.core.services.core_api_session_service import CoreApiSessionService
 from src.core.services.livekit_token_service import LiveKitTokenService
 from src.schemas.common import APIResponse
@@ -16,18 +20,6 @@ from src.schemas.livekit import (
 )
 
 router = APIRouter(prefix="/livekit", tags=["livekit"])
-
-
-def get_livekit_token_service() -> LiveKitTokenService:
-    """Build the LiveKit token service for the request."""
-
-    return LiveKitTokenService()
-
-
-def get_core_api_session_service() -> CoreApiSessionService:
-    """Build the core-api session lifecycle delegate."""
-
-    return CoreApiSessionService()
 
 
 @router.post(

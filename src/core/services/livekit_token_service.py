@@ -9,7 +9,11 @@ from datetime import UTC, datetime, timedelta
 from livekit import api
 
 from src.config.settings import settings
-from src.core.exceptions import InternalServerException
+from src.core.exceptions import (
+    LiveKitConfigurationException,
+    SessionTokenExpiryInvalidException,
+    SessionTokenExpiryMissingException,
+)
 from src.core.services.core_api_session_service import CoreApiSessionService
 from src.schemas.livekit import (
     CandidateConnectionContext,
@@ -42,12 +46,14 @@ class LiveKitTokenService:
         Ensure all required LiveKit configuration variables are present.
 
         Raises:
-            InternalServerException: If the URL, API key, or API secret are missing.
+            LiveKitConfigurationException: If the URL, API key, or API secret are missing.
         """
         if not settings.LIVEKIT_URL:
-            raise InternalServerException("LiveKit URL is not configured.")
+            raise LiveKitConfigurationException("LiveKit URL is not configured.")
         if not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
-            raise InternalServerException("LiveKit API credentials are not configured.")
+            raise LiveKitConfigurationException(
+                "LiveKit API credentials are not configured."
+            )
 
     @staticmethod
     def _livekit_ttl(expires_at: datetime) -> timedelta:
@@ -78,10 +84,10 @@ class LiveKitTokenService:
             try:
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
             except ValueError as exc:
-                raise InternalServerException(
+                raise SessionTokenExpiryInvalidException(
                     "Candidate session expiry is invalid."
                 ) from exc
-        raise InternalServerException("Candidate session expiry is missing.")
+        raise SessionTokenExpiryMissingException("Candidate session expiry is missing.")
 
     @staticmethod
     def _access_token(
@@ -170,7 +176,9 @@ class LiveKitTokenService:
             The authorized LiveKitTokenResponse containing the JWT and connection details.
 
         Raises:
-            InternalServerException: If LiveKit credentials are missing or the token is invalid.
+            LiveKitConfigurationException: If LiveKit credentials are missing.
+            SessionTokenExpiryInvalidException: If session expiry is invalid.
+            SessionTokenExpiryMissingException: If session expiry is missing.
         """
 
         self._validate_configuration()

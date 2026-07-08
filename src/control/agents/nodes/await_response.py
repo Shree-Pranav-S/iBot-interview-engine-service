@@ -7,33 +7,10 @@ from typing import Any
 from langgraph.types import interrupt
 
 from src.control.agents.key_routing import compute_turn_key_slot
-from src.control.agents.nodes.turn_utils import build_candidate_turn
 from src.control.agents.state import InterviewState
+from src.control.agents.utils.await_response import _normalize_event
+from src.control.agents.utils.turn_utils import build_candidate_turn
 from src.utils.interview_graph import utc_now_iso
-
-
-def _normalize_event(raw: Any) -> dict[str, Any]:
-    """
-    Ensure the incoming raw event from LiveKit is formatted as a consistent dictionary.
-
-    Args:
-        raw: The raw event which may be a string (like "__SILENCE__") or a dict.
-
-    Returns:
-        A normalized dictionary with at least an 'event_type' and 'text'.
-    """
-    if isinstance(raw, str):
-        if raw == "__SILENCE__":
-            return {
-                "event_type": "silence_timeout",
-                "text": "",
-                "silence_duration_ms": 5000,
-            }
-        return {"event_type": "candidate_answer", "text": raw}
-
-    if isinstance(raw, dict):
-        return dict(raw)
-    return {"event_type": "candidate_answer", "text": ""}
 
 
 def await_candidate_response(state: InterviewState) -> dict[str, Any]:

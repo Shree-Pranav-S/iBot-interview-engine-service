@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from src.control.agents.state import InterviewState
+from src.core.exceptions import QuestionValidationException
 
 _FRAMING_MODES = (
     "concrete_scenario",
@@ -121,13 +122,15 @@ def validate_unique_question(
     for item in asked_questions:
         prior_text = str(item.get("question_text") or "")
         if normalized == normalize_question_text(prior_text):
-            raise ValueError("question generator repeated a previous question")
+            raise QuestionValidationException(
+                "question generator repeated a previous question"
+            )
         if allow_related_probe:
             continue
         prior_tokens = _question_tokens(prior_text)
         union = new_tokens | prior_tokens
         if union and len(new_tokens & prior_tokens) / len(union) >= 0.80:
-            raise ValueError(
+            raise QuestionValidationException(
                 "question generator lightly paraphrased a previous question"
             )
 
@@ -144,7 +147,7 @@ def validate_topic_fresh(
         return
     normalized = topic.strip().casefold()
     if normalized and normalized in {t.casefold() for t in used_topics}:
-        raise ValueError("question generator reused a prior topic")
+        raise QuestionValidationException("question generator reused a prior topic")
 
 
 def validate_no_placeholder_phrasing(question_text: str, skill: str) -> None:
@@ -154,13 +157,17 @@ def validate_no_placeholder_phrasing(question_text: str, skill: str) -> None:
     skill_fold = skill.casefold()
     for pattern in _PLACEHOLDER_PATTERNS:
         if re.search(pattern, lowered, flags=re.IGNORECASE):
-            raise ValueError("question generator used placeholder phrasing")
+            raise QuestionValidationException(
+                "question generator used placeholder phrasing"
+            )
     if skill_fold and (
         f"practical {skill_fold} use" in lowered
         or f"{skill_fold} use in {skill_fold}" in lowered
         or f"applying {skill_fold} in {skill_fold}" in lowered
     ):
-        raise ValueError("question generator repeated the skill tautologically")
+        raise QuestionValidationException(
+            "question generator repeated the skill tautologically"
+        )
 
 
 def validate_stem_diversity(
@@ -179,7 +186,9 @@ def validate_stem_diversity(
         for item in (asked_questions or [])[-lookback:]
     ]
     if stem in {s for s in recent if s}:
-        raise ValueError("question generator repeated a recent opening stem")
+        raise QuestionValidationException(
+            "question generator repeated a recent opening stem"
+        )
 
 
 def validate_generated_question(

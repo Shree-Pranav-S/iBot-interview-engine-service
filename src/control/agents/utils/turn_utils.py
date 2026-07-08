@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.control.agents.nodes.question_strategy import (
+from src.control.agents.state import InterviewState
+from src.control.agents.utils.question_strategy import (
     current_section_name,
     section_expected_signals,
 )
-from src.control.agents.state import InterviewState
 from src.utils.interview_graph import deterministic_turn_id, utc_now_iso
 
 

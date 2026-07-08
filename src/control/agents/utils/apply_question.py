@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from src.control.agents.nodes.question_strategy import target_section
-from src.control.agents.nodes.turn_utils import build_bot_turn
 from src.control.agents.state import Difficulty, InterviewState
+from src.control.agents.utils.question_strategy import target_section
+from src.control.agents.utils.turn_utils import build_bot_turn
 
 
 def apply_resolved_question(

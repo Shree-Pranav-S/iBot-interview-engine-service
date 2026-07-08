@@ -9,6 +9,7 @@ class AppException(Exception):
 
     status_code: int = HTTPStatus.INTERNAL_SERVER_ERROR
     message: str = "Internal server error."
+    error_code: str = "INTERNAL_ERROR"
 
     def __init__(
         self,
@@ -16,12 +17,14 @@ class AppException(Exception):
         *,
         status_code: int | None = None,
         details: list[dict[str, Any]] | None = None,
+        error_code: str | None = None,
     ) -> None:
         """Override the default message, status, or structured details."""
 
         self.message = message or self.message
         self.status_code = status_code or self.status_code
         self.details = details
+        self.error_code = error_code or self.error_code
         super().__init__(self.message)
 
 

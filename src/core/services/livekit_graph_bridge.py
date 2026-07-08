@@ -15,12 +15,12 @@ from src.control.agents.graphs import get_graph
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
 )
-from src.control.agents.nodes.time_manager import (
+from src.control.agents.state import InterviewState
+from src.control.agents.utils.time_manager import (
     FORCE_BEHAVIOURAL_REMAINING_SECS,
     SECTION_BARGE_IN_GRACE_SECS,
     section_transition_deadline_elapsed,
 )
-from src.control.agents.state import InterviewState
 from src.core.services.core_api_session_service import CoreApiSessionService
 from src.core.services.event_log_service import (
     try_record_event_in_background,

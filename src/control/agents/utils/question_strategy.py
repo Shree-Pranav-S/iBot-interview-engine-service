@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from src.control.agents.state import Difficulty, InterviewState
+from src.core.exceptions.interview import InterviewPlanMissingException
 
 DIFFICULTIES: tuple[Difficulty, ...] = ("easy", "medium", "hard")
 ROLE_INITIAL_DIFFICULTY: dict[str, Difficulty] = {
@@ -136,7 +137,9 @@ def target_section(state: InterviewState) -> tuple[int, dict[str, Any]]:
 
     sections = list(state.get("runtime_sections") or [])
     if not sections:
-        raise RuntimeError("No runtime interview sections are available")
+        raise InterviewPlanMissingException(
+            "No runtime interview sections are available"
+        )
 
     pending_index = state.get("pending_section_index")
     if pending_index is not None:

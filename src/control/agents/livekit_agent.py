@@ -30,13 +30,18 @@ from livekit.agents import (
 from livekit.plugins import deepgram
 
 from src.config.settings import settings
-from src.control.agents.nodes.classify_response import (
+from src.control.agents.state import InterviewState
+from src.control.agents.templates import choose_template_avoiding
+from src.control.agents.utils.classify_response import (
     self_intro_is_substantial,
     will_bypass_interviewer_llm,
 )
-from src.control.agents.nodes.question_strategy import is_self_intro_phase
-from src.control.agents.state import InterviewState
-from src.control.agents.templates import choose_template_avoiding
+from src.control.agents.utils.question_strategy import is_self_intro_phase
+from src.core.exceptions import (
+    AgentRuntimeException,
+    MissingAgentMetadataException,
+    UnsupportedSessionModeException,
+)
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
 from src.utils.livekit import (
     INTERVIEW_CLOSING_EVENT,
@@ -49,7 +54,7 @@ USER_AWAY_TIMEOUT_SECS = 5.0
 THINK_EXTENSION_TIMEOUT_SECS = 15.0
 POST_TURN_SILENCE_GUARD_SECS = 0.3
 POST_BARGE_RESUMED_SPEECH_GUARD_SECS = 0.75
-SELF_INTRO_TURN_SETTLE_SECS = 1.2
+SELF_INTRO_TURN_SETTLE_SECS = 0.8
 SELF_INTRO_TRANSITION_REPLY_TYPE = "self_intro_transition_question"
 DEMO_GREETING = (
     "Welcome to this demo interview. This is a short practice space to help "
@@ -140,7 +145,7 @@ class InternalPipelineLLM(llm.LLM):  # type: ignore[misc]
         Reject the fallback provider path.
 
         Raises:
-            RuntimeError: Always, because the agent implements ``llm_node``.
+            AgentRuntimeException: Always, because the agent implements ``llm_node``.
         """
         del (
             chat_ctx,
@@ -150,7 +155,7 @@ class InternalPipelineLLM(llm.LLM):  # type: ignore[misc]
             tool_choice,
             extra_kwargs,
         )
-        raise RuntimeError("This agent only supports its custom response node")
+        raise AgentRuntimeException("This agent only supports its custom response node")
 
 
 class DemoLiveKitAgent(Agent):  # type: ignore[misc]
@@ -1166,7 +1171,8 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         ctx: The LiveKit job context.
 
     Raises:
-        RuntimeError: If critical metadata is missing from the job.
+        MissingAgentMetadataException: If critical metadata is missing from the job.
+        UnsupportedSessionModeException: If the session mode is not supported.
     """
 
     metadata = json.loads(ctx.job.metadata or "{}")
@@ -1176,11 +1182,15 @@ async def interview_agent(ctx: agents.JobContext) -> None:
     connection_id = str(metadata.get("connection_id") or "")
 
     if not candidate_assessment_id:
-        raise RuntimeError("Missing candidate_assessment_id in LiveKit job metadata")
+        raise MissingAgentMetadataException(
+            "Missing candidate_assessment_id in LiveKit job metadata"
+        )
     if session_mode not in {"interview", "demo"}:
-        raise RuntimeError(f"Unsupported LiveKit session mode: {session_mode}")
+        raise UnsupportedSessionModeException(
+            f"Unsupported LiveKit session mode: {session_mode}"
+        )
     if session_mode == "interview" and (not interview_session_id or not connection_id):
-        raise RuntimeError(
+        raise MissingAgentMetadataException(
             "Missing interview session connection metadata in LiveKit job"
         )
 

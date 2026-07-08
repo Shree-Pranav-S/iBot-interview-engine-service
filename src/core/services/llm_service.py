@@ -14,6 +14,7 @@ from groq import AsyncGroq
 from pydantic import BaseModel
 
 from src.config.settings import settings
+from src.core.exceptions import LLMConfigurationException, LLMProviderException
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def _api_key_pool(purpose: str) -> list[str]:
     ]
     pool = list(dict.fromkeys(candidates))
     if not pool:
-        raise RuntimeError(f"Groq {purpose} API key is not configured.")
+        raise LLMConfigurationException(f"Groq {purpose} API key is not configured.")
     return pool
 
 
@@ -150,7 +151,7 @@ def _ordered_candidates(
         if key not in _disabled_keys and _key_unavailable_until.get(key, 0.0) <= now
     ]
     if not candidates:
-        raise RuntimeError(
+        raise LLMConfigurationException(
             f"All configured Groq keys for {purpose} are disabled or cooling down."
         )
     return candidates, len(pool)
@@ -268,7 +269,7 @@ async def _call_with_fallback(
 
     if last_exc is not None:
         raise last_exc
-    raise RuntimeError(f"No healthy Groq key was available for {purpose}.")
+    raise LLMProviderException(f"No healthy Groq key was available for {purpose}.")
 
 
 async def generate(
@@ -334,7 +335,7 @@ async def lightweight(
     max_tokens: int = 192,
     temperature: float = 0.3,
 ) -> ResponseModelT:
-    """Run a short classifier-model completion through strict Structured Outputs."""
+    """Run a fast, general-purpose text completion (e.g. rephrasing, formatting) using the smaller/faster model."""
     return await _call_with_fallback(
         purpose="classification",
         response_model=response_model,
