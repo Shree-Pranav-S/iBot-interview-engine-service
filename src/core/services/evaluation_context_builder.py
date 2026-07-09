@@ -21,26 +21,12 @@ from src.utils.evaluation_context import (
     _json_object,
     _live_evaluation,
     _meaningful_answer,
-    _normalize_skill_key,
     _question_id,
     _response_type,
     _string_list,
     _technical_skill_specs,
     _transcript_hash,
 )
-
-
-def normalize_skill_key(value: Any) -> str:
-    """
-    Normalize a skill name into a consistent lowercase string for matching.
-
-    Args:
-        value: The raw skill name.
-
-    Returns:
-        A normalized string containing only alphanumeric characters and allowed symbols (+, #, .).
-    """
-    return _normalize_skill_key(value)
 
 
 def build_question_answer_pairs(

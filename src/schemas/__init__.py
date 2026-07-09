@@ -1,7 +1,11 @@
 """Schemas package for interview-engine."""
 
 from src.schemas.common import APIResponse, ErrorDetail, ErrorResponse
-from src.schemas.evaluation_llm import FinalEvaluationRecord, HiringRecommendation
+from src.schemas.evaluation_llm import (
+    FinalEvaluationRecord,
+    HiringRecommendation,
+    NvidiaEvaluationResult,
+)
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.schemas.livekit import (
     CandidateConnectionContext,
@@ -24,6 +28,7 @@ __all__ = [
     "HiringRecommendation",
     "LiveKitTokenRequest",
     "LiveKitTokenResponse",
+    "NvidiaEvaluationResult",
     "RecruiterEventType",
     "RecruiterRealtimeEvent",
 ]

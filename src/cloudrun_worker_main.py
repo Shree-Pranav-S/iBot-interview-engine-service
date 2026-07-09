@@ -10,6 +10,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from src.observability.logging import configure_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +62,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     try:
         main()
     except KeyboardInterrupt:

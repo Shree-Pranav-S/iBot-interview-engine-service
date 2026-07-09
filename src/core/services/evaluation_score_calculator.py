@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.config.settings import settings
-from src.core.services.evaluation_llm_client import NvidiaEvaluationResult
-from src.schemas.evaluation_llm import FinalEvaluationRecord
+from src.schemas.evaluation_llm import FinalEvaluationRecord, NvidiaEvaluationResult
 from src.schemas.internal_evaluation import (
     EVALUATION_SCHEMA_VERSION,
     EvaluationContextBundle,

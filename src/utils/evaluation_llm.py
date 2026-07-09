@@ -26,20 +26,19 @@ from src.core.exceptions.evaluation import (
     PermanentEvaluationError,
     TransientEvaluationError,
 )
-from src.core.services.evaluation_context_builder import normalize_skill_key
 from src.core.services.evaluation_prompt import (
     HOLISTIC_EVALUATION_SYSTEM_PROMPT,
 )
 from src.schemas.evaluation_llm import (
     HolisticEvaluationLLMOutput,
+    NvidiaEvaluationResult,
 )
 from src.schemas.internal_evaluation import EvaluationContextBundle
+from src.utils.evaluation_context import _normalize_skill_key
 
 logger = logging.getLogger(__name__)
 _client: AsyncOpenAI | None = None
 _fallback_client: AsyncOpenAI | None = None
-
-from src.core.services.evaluation_llm_client import NvidiaEvaluationResult  # noqa: E402
 
 
 def _get_client(use_fallback: bool = False) -> AsyncOpenAI:
@@ -179,13 +178,13 @@ def _remap_skill_dict(
     """
     if not isinstance(value, dict):
         return {}
-    by_normalized_key = {normalize_skill_key(key): item for key, item in value.items()}
+    by_normalized_key = {_normalize_skill_key(key): item for key, item in value.items()}
     remapped: dict[str, Any] = {}
     for spec in bundle.technical_skills:
         if spec.name in value:
             remapped[spec.name] = value[spec.name]
             continue
-        matching_value = by_normalized_key.get(normalize_skill_key(spec.name))
+        matching_value = by_normalized_key.get(_normalize_skill_key(spec.name))
         if matching_value is not None:
             remapped[spec.name] = matching_value
     return remapped

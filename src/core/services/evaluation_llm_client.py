@@ -4,24 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any
 
 from openai.types.chat import ChatCompletionMessageParam
 
 from src.core.exceptions.evaluation import EvaluationSchemaError
-from src.schemas.evaluation_llm import HolisticEvaluationLLMOutput
+from src.schemas.evaluation_llm import (
+    HolisticEvaluationLLMOutput,
+    NvidiaEvaluationResult,
+)
 from src.schemas.internal_evaluation import EvaluationContextBundle
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class NvidiaEvaluationResult:
-    """Validated evaluator output plus the provider's original JSON object."""
-
-    output: HolisticEvaluationLLMOutput
-    raw_output: dict[str, Any]
 
 
 from src.utils.evaluation_llm import (  # noqa: E402

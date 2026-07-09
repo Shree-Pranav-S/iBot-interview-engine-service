@@ -4,9 +4,11 @@ import socket
 from typing import Any
 
 from celery import Celery
+from celery.signals import worker_process_init
 from kombu import Queue
 
 from src.config.settings import settings
+from src.observability.logging import configure_logging
 
 
 def _redis_broker_transport_options() -> dict[str, Any]:
@@ -28,6 +30,13 @@ def _redis_broker_transport_options() -> dict[str, Any]:
         "socket_connect_timeout": settings.REDIS_SOCKET_CONNECT_TIMEOUT,
         "socket_timeout": max(settings.REDIS_SOCKET_TIMEOUT, 30),
     }
+
+
+@worker_process_init.connect
+def _configure_worker_logging(**_: object) -> None:
+    """Apply JSON logging inside each Celery worker subprocess."""
+
+    configure_logging()
 
 
 celery_app = Celery(

@@ -84,7 +84,7 @@ def _safe_classification_fallback(text: str) -> CandidateResponseClassification:
     return CandidateResponseClassification(
         response_type="answer",
         clarification_type=None,
-        is_substantial=_spoken_word_count(text) > 2,
+        is_substantial=_spoken_word_count(text) > 5,
         interview_meta_type=None,
     )
 

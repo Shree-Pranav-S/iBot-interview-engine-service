@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import (
@@ -303,3 +304,11 @@ class FinalEvaluationRecord(EvaluationModel):
     evaluation_schema_version: str
     transcript_hash: str
     raw_model_output: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class NvidiaEvaluationResult:
+    """Validated evaluator output plus the provider's original JSON object."""
+
+    output: HolisticEvaluationLLMOutput
+    raw_output: dict[str, Any]

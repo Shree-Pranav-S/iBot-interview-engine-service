@@ -8,7 +8,7 @@ from src.schemas.evaluation_llm import HiringRecommendation
 from src.schemas.internal_evaluation import EvaluationContextBundle
 
 if TYPE_CHECKING:
-    from src.core.services.evaluation_llm_client import NvidiaEvaluationResult
+    from src.schemas.evaluation_llm import NvidiaEvaluationResult
 
 TECHNICAL_WEIGHT = 0.75
 BEHAVIOURAL_CULTURAL_WEIGHT = 0.15

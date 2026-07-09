@@ -43,6 +43,7 @@ from src.core.exceptions import (
     UnsupportedSessionModeException,
 )
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
+from src.observability.logging import configure_logging
 from src.utils.livekit import (
     INTERVIEW_CLOSING_EVENT,
     INTERVIEW_DATA_TOPIC,
@@ -83,6 +84,7 @@ def prewarm(proc: agents.JobProcess) -> None:
     Args:
         proc: The JobProcess instance from LiveKit.
     """
+    configure_logging()
     proc.userdata["vad"] = inference.VAD(
         model="silero",
         min_speech_duration=settings.VAD_MIN_SPEECH_DURATION_SECS,

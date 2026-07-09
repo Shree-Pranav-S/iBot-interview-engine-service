@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote_plus
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "interview-engine-service"
+    APP_ENV: str = Field(default="development")
 
     # Deepgram speech services.
     DEEPGRAM_API_KEY: str = ""
