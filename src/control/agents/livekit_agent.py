@@ -57,6 +57,10 @@ POST_TURN_SILENCE_GUARD_SECS = 0.3
 POST_BARGE_RESUMED_SPEECH_GUARD_SECS = 0.75
 SELF_INTRO_TURN_SETTLE_SECS = 0.8
 SELF_INTRO_TRANSITION_REPLY_TYPE = "self_intro_transition_question"
+TURN_PROCESSING_FAILURE_REPLY = (
+    "I had a brief issue processing that response. "
+    "Let's continue with the next question."
+)
 DEMO_GREETING = (
     "Welcome to this demo interview. This is a short practice space to help "
     "you become comfortable with the interview environment. Please make "
@@ -874,10 +878,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                             )
                         },
                     )
-                    reply_text = (
-                        "I had a brief issue processing that response. "
-                        "Let's continue with the next question."
-                    )
+                    reply_text = TURN_PROCESSING_FAILURE_REPLY
                     is_closing_reply = False
                 finally:
                     self._awaiting_agent_reply = False
@@ -1028,24 +1029,9 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 is_closing_reply = self._mark_closed_from_state()
             except Exception:
                 logger.exception("LangGraph turn failed")
-                reply_text = (
-                    "I had a brief issue processing that response. "
-                    "Let's continue with the next question."
-                )
+                reply_text = TURN_PROCESSING_FAILURE_REPLY
                 is_closing_reply = False
         return reply_text, is_closing_reply
-
-    def _extract_candidate_text(self, chat_ctx: llm.ChatContext) -> str:
-        """Resolve the latest user transcript from chat context or live STT buffer."""
-
-        items = getattr(chat_ctx, "items", None) or []
-        for item in reversed(items):
-            if getattr(item, "role", None) == "user":
-                text = getattr(item, "text_content", None) or ""
-                cleaned = " ".join(str(text).split())
-                if cleaned:
-                    return cleaned
-        return " ".join(self._live_user_transcript.split())
 
     async def llm_node(
         self,
@@ -1069,26 +1055,19 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         Yields:
             Text chunks for the TTS engine.
         """
-        del tools, model_settings
+        del chat_ctx, tools, model_settings
 
         candidate_text = self._pending_user_text
         duration_ms = self._pending_duration_ms
-        is_final_turn = candidate_text is not None
-
-        if is_final_turn:
-            self._pending_user_text = None
-            self._pending_duration_ms = None
-        else:
-            candidate_text = self._extract_candidate_text(chat_ctx)
-            duration_ms = self._last_user_turn_duration_ms
+        if candidate_text is None:
+            return
+        self._pending_user_text = None
+        self._pending_duration_ms = None
 
         if self._interview_closed:
             return
 
         if not candidate_text:
-            return
-
-        if not is_final_turn:
             return
 
         try:

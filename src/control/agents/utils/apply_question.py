@@ -131,12 +131,7 @@ def apply_resolved_question(
         ),
     )
 
-    if entering_new_section:
-        thread_follow_up_used = False
-    elif follow_interesting_thread:
-        thread_follow_up_used = True
-    else:
-        thread_follow_up_used = False
+    thread_follow_up_used = follow_interesting_thread and not entering_new_section
 
     question_id = (
         f"{state['interview_session_id']}:question:"

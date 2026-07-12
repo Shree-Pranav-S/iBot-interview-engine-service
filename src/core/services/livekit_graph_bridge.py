@@ -262,6 +262,17 @@ class LiveKitInterviewBridge:
         }
         self.state = {**dict(result or {}), **timer_state}
 
+    async def _resume_graph(self, event: dict[str, Any]) -> str:
+        """Resume the pending graph interrupt and return its normalized reply."""
+
+        graph = await get_graph()
+        result = await graph.ainvoke(
+            Command(resume=event),
+            config=self._config,
+        )
+        self._merge_result(result)
+        return str(self.state.get("bot_reply_text") or "").strip()
+
     async def submit_candidate_turn(
         self,
         text: str,
@@ -289,7 +300,6 @@ class LiveKitInterviewBridge:
         if state.get("phase_complete"):
             return ""
 
-        graph = await get_graph()
         event: dict[str, Any] = {
             "event_type": "candidate_answer",
             "text": " ".join(text.split()),
@@ -298,12 +308,7 @@ class LiveKitInterviewBridge:
             "elapsed_secs": self.elapsed_secs(),
             "received_at": utc_now_iso(),
         }
-        result = await graph.ainvoke(
-            Command(resume=event),
-            config=self._config,
-        )
-        self._merge_result(result)
-        return str(self.state.get("bot_reply_text") or "").strip()
+        return await self._resume_graph(event)
 
     async def submit_silence(self) -> str:
         """
@@ -318,7 +323,6 @@ class LiveKitInterviewBridge:
         if not state or state.get("phase_complete"):
             return ""
 
-        graph = await get_graph()
         event = {
             "event_type": "silence_timeout",
             "text": "",
@@ -326,12 +330,7 @@ class LiveKitInterviewBridge:
             "elapsed_secs": self.elapsed_secs(),
             "received_at": utc_now_iso(),
         }
-        result = await graph.ainvoke(
-            Command(resume=event),
-            config=self._config,
-        )
-        self._merge_result(result)
-        return str(self.state.get("bot_reply_text") or "").strip()
+        return await self._resume_graph(event)
 
     async def submit_section_time_barge_in(
         self,
@@ -353,19 +352,13 @@ class LiveKitInterviewBridge:
         if not state or state.get("should_close"):
             return ""
 
-        graph = await get_graph()
         event = {
             "event_type": "section_time_barge_in",
             "text": " ".join(partial_candidate_text.split()),
             "elapsed_secs": self.elapsed_secs(),
             "received_at": utc_now_iso(),
         }
-        result = await graph.ainvoke(
-            Command(resume=event),
-            config=self._config,
-        )
-        self._merge_result(result)
-        return str(self.state.get("bot_reply_text") or "").strip()
+        return await self._resume_graph(event)
 
     async def finalize_closing(self) -> None:
         """

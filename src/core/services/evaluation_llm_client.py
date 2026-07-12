@@ -13,15 +13,9 @@ from src.schemas.evaluation_llm import (
     NvidiaEvaluationResult,
 )
 from src.schemas.internal_evaluation import EvaluationContextBundle
+from src.utils.evaluation_llm import _base_messages, _complete, _validate_output
 
 logger = logging.getLogger(__name__)
-
-
-from src.utils.evaluation_llm import (  # noqa: E402
-    _base_messages,
-    _complete,
-    _validate_output,
-)
 
 
 async def run_nvidia_holistic_evaluation(
