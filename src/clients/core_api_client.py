@@ -159,6 +159,31 @@ class CoreApiClient:
             ),
         )
 
+    async def record_tab_switch(
+        self,
+        *,
+        session_id: uuid.UUID,
+        connection_id: str,
+        candidate_assessment_id: uuid.UUID,
+        event_id: uuid.UUID,
+        occurred_at: datetime,
+    ) -> dict[str, Any]:
+        """Persist one tab switch and return the authoritative count/outcome."""
+
+        return cast(
+            dict[str, Any],
+            await self._request(
+                "POST",
+                f"/internal/interview/sessions/{session_id}/tab-switch",
+                json={
+                    "connection_id": connection_id,
+                    "candidate_assessment_id": str(candidate_assessment_id),
+                    "event_id": str(event_id),
+                    "occurred_at": occurred_at.isoformat(),
+                },
+            ),
+        )
+
     async def create_event_log(self, event: EventLogCreate) -> None:
         """Persist one durable interview-engine event."""
 

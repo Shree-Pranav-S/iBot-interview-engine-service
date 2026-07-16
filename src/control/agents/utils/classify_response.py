@@ -87,6 +87,26 @@ IRRELEVANT_TOPIC_PATTERN = re.compile(
     r"tell me the answer|give me the answer|what is the correct answer)\b",
     re.IGNORECASE,
 )
+ANSWER_SOLICITATION_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:give|tell|show|provide)\s+me\s+(?:the\s+)?(?:correct\s+)?(?:answer|solution)(?:\s+to\s+(?:this|that|the\s+question))?|"
+    r"(?:you\s+(?:yourself\s+)?(?:answer|solve)(?:\s+(?:this|that|the\s+question))?)|"
+    r"(?:(?:answer|solve)\s+(?:this|that|the\s+question)\s+(?:yourself|for\s+me))|"
+    r"(?:what(?:'s|\s+is)\s+the\s+(?:correct\s+)?(?:answer|solution))|"
+    r"(?:write|generate)\s+(?:the\s+)?(?:answer|solution)\s+for\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+PROMPT_INJECTION_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|system|developer)\s+(?:instructions?|prompts?|messages?)|"
+    r"(?:reveal|repeat|show|print|leak)\s+(?:your\s+)?(?:hidden\s+|system\s+|developer\s+)?(?:prompt|instructions?|message)|"
+    r"(?:bypass|disable|break|circumvent)\s+(?:your\s+|the\s+)?(?:rules?|restrictions?|guardrails?|safety|policy)|"
+    r"(?:act|pretend)\s+(?:as|like)\s+(?:you\s+are\s+)?(?:not\s+an?\s+interviewer|unrestricted|developer\s+mode|dan)|"
+    r"(?:jailbreak|developer\s+mode|system\s+prompt)"
+    r")\b",
+    re.IGNORECASE,
+)
 TECHNICAL_ANSWER_SIGNAL_PATTERN = re.compile(
     r"\b(?:"
     r"api|algorithm|async|cache|class|code|connection|cpu|database|db|"
@@ -226,6 +246,16 @@ def is_deterministic_classification_source(source: str | None) -> bool:
     return str(source or "") in DETERMINISTIC_CLASSIFICATION_SOURCES
 
 
+def is_integrity_violation_attempt(text: str) -> bool:
+    """Detect direct answer solicitation and common prompt-injection attempts."""
+
+    normalized = " ".join(str(text or "").split())
+    return bool(
+        ANSWER_SOLICITATION_PATTERN.search(normalized)
+        or PROMPT_INJECTION_PATTERN.search(normalized)
+    )
+
+
 def _is_developed_spoken_answer(text: str, *, min_words: int = 10) -> bool:
     """Detect longer answer attempts that should not match clarification regexes."""
 
@@ -243,6 +273,7 @@ def will_bypass_interviewer_llm(state: InterviewState, text: str) -> bool:
     if det is not None and det.get("response_type") in {
         "silence",
         "clarification",
+        "integrity_violation",
         "irrelevant",
     }:
         return True
@@ -310,6 +341,13 @@ def _deterministic_classification(
             )
         return _result(
             response_type="silence",
+            clarification_type=None,
+            is_substantial=None,
+        )
+
+    if is_integrity_violation_attempt(text):
+        return _result(
+            response_type="integrity_violation",
             clarification_type=None,
             is_substantial=None,
         )
@@ -419,7 +457,8 @@ def _turn_violations(
 ) -> list[dict[str, Any]]:
     """
     Analyze the classification to detect and generate proctoring violations for this turn.
-    Catches irrelevant answers, skipped resume skills, and experience inflation.
+    Catches integrity attacks, irrelevant answers, skipped resume skills, and
+    experience inflation.
 
     Args:
         state: The current interview state.
@@ -431,6 +470,19 @@ def _turn_violations(
         A list of triggered violation dictionaries.
     """
     violations: list[dict[str, Any]] = []
+    if response_type == "integrity_violation":
+        violations.append(
+            _violation(
+                state,
+                "prompt_injection_or_answer_solicitation",
+                severity="critical",
+                metadata={
+                    "question_id": state.get("current_question_id"),
+                    "current_skill": state.get("current_technical_skill"),
+                },
+            )
+        )
+
     if response_type == "irrelevant":
         violations.append(
             _violation(

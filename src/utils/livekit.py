@@ -22,7 +22,10 @@ def candidate_participant_identity(candidate_id: str) -> str:
 
 
 INTERVIEW_DATA_TOPIC = "ibot.interview"
+INTERVIEW_PROCTORING_TOPIC = "ibot.proctoring"
 INTERVIEW_CLOSING_EVENT = "interview_closing"
+INTERVIEW_TERMINATED_EVENT = "interview_terminated"
+TAB_SWITCH_EVENT = "tab_switch"
 
 
 def chunk_for_tts(text: str, *, max_chars: int = 120) -> list[str]:

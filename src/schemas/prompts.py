@@ -20,6 +20,7 @@ class CandidateResponseClassification(StrictPromptModel):
     response_type: Literal[
         "answer",
         "clarification",
+        "integrity_violation",
         "irrelevant",
         "interview_meta",
     ]
@@ -72,7 +73,7 @@ class CandidateResponseClassification(StrictPromptModel):
             if self.interview_meta_type is None:
                 raise ValueError("interview_meta requires interview_meta_type")
         elif self.interview_meta_type is not None:
-            raise ValueError("irrelevant requires interview_meta_type=null")
+            raise ValueError(f"{self.response_type} requires interview_meta_type=null")
         return self
 
 

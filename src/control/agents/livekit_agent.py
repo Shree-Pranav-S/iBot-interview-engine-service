@@ -11,7 +11,9 @@ import json
 import logging
 import random
 import time
+import uuid
 from collections.abc import AsyncIterable
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from livekit import agents, rtc
@@ -47,6 +49,9 @@ from src.observability.logging import configure_logging
 from src.utils.livekit import (
     INTERVIEW_CLOSING_EVENT,
     INTERVIEW_DATA_TOPIC,
+    INTERVIEW_PROCTORING_TOPIC,
+    INTERVIEW_TERMINATED_EVENT,
+    TAB_SWITCH_EVENT,
     chunk_for_tts,
 )
 
@@ -554,6 +559,89 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 "Failed to publish interview closing signal",
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
+
+    async def _publish_interview_terminated_signal(self, tab_switch_count: int) -> None:
+        """Tell the candidate UI that the server enforced the tab-switch limit."""
+
+        try:
+            room = self.session.room_io.room
+            await room.local_participant.publish_data(
+                json.dumps(
+                    {
+                        "type": INTERVIEW_TERMINATED_EVENT,
+                        "reason": "tab_switch_limit",
+                        "tab_switch_count": tab_switch_count,
+                    }
+                ),
+                topic=INTERVIEW_DATA_TOPIC,
+                reliable=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to publish interview termination signal",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
+    async def handle_proctoring_packet(self, packet: rtc.DataPacket) -> None:
+        """Validate and persist candidate tab-switch packets from the main room."""
+
+        participant = packet.participant
+        if (
+            self._interview_closed
+            or packet.topic != INTERVIEW_PROCTORING_TOPIC
+            or participant is None
+            or not participant.identity.startswith("candidate-")
+            or len(packet.data) > 1024
+        ):
+            return
+
+        try:
+            payload = json.loads(packet.data.decode("utf-8"))
+            if not isinstance(payload, dict) or payload.get("type") != TAB_SWITCH_EVENT:
+                return
+            event_id = uuid.UUID(str(payload.get("event_id") or ""))
+        except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+            logger.warning(
+                "Ignored invalid interview proctoring packet",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+            return
+
+        try:
+            outcome = await self.bridge.record_tab_switch(
+                event_id=event_id,
+                occurred_at=datetime.now(UTC),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist interview tab switch",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+            return
+
+        raw_count = outcome.get("tab_switch_count")
+        count = raw_count if isinstance(raw_count, int) else 0
+        logger.info(
+            "Interview tab switch recorded",
+            extra={
+                "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                "tab_switch_count": count,
+                "appended": bool(outcome.get("appended")),
+                "terminated": bool(outcome.get("terminated")),
+            },
+        )
+        if not bool(outcome.get("terminated")):
+            return
+
+        self._interview_closed = True
+        # A policy termination must never enter the normal closing finalizer,
+        # which would overwrite the durable TERMINATED status with COMPLETED.
+        self._closing_finalize_requested = True
+        self._cancel_pending_silence()
+        self._cancel_pending_section_barge()
+        self.session.input.set_audio_enabled(False)
+        await self.session.interrupt(force=True)
+        await self._publish_interview_terminated_signal(count)
 
     def track_agent_state(self, new_state: str) -> None:
         """
@@ -1302,6 +1390,11 @@ async def interview_agent(ctx: agents.JobContext) -> None:
         )
         if isinstance(agent, InterviewLiveKitAgent):
             asyncio.create_task(agent.handle_session_close(reason))
+
+    @ctx.room.on("data_received")
+    def _on_data_received(packet: rtc.DataPacket) -> None:
+        if isinstance(agent, InterviewLiveKitAgent):
+            asyncio.create_task(agent.handle_proctoring_packet(packet))
 
     rtc_config = (
         rtc.RtcConfiguration(

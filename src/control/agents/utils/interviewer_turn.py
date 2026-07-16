@@ -74,6 +74,7 @@ def _should_finish_deterministically(
     return det is not None and det.get("response_type") in {
         "silence",
         "clarification",
+        "integrity_violation",
         "irrelevant",
     }
 

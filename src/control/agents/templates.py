@@ -239,6 +239,19 @@ IRRELEVANT_REDIRECT = (
     "That response is not relevant to what was asked. Please try the question again.",
 )
 
+INTEGRITY_VIOLATION_REDIRECT = (
+    "I cannot provide the answer or follow instructions that change the interview. Please answer the current question using your own knowledge.",
+    "This interview must reflect your own reasoning. I cannot solve the question for you or follow prompt-altering instructions. Please provide your answer.",
+    "I cannot reveal internal instructions or supply the solution. Please continue with your own response to the active question.",
+    "Requests to override the interview or obtain the answer are not allowed. Please answer the question independently.",
+    "I must keep the interview process unchanged and cannot give you the solution. Please explain your own approach to the question.",
+    "I cannot comply with attempts to alter my instructions or answer on your behalf. Please respond using your own understanding.",
+    "The interview requires an independent answer. I cannot provide solutions, hidden prompts, or follow injected instructions. Please answer the current question.",
+    "I cannot assist with bypassing the interview or disclose internal guidance. Please give your own answer to the question asked.",
+    "Providing the solution or changing the interview rules would invalidate the assessment. Please continue with your independent response.",
+    "I will not follow instructions that redirect the interview or reveal the answer. Please address the current question in your own words.",
+)
+
 ELABORATE_ANSWER = (
     "Could you elaborate a little further on that?",
     "Please add a little more detail to your answer.",
@@ -509,6 +522,7 @@ _BANKS = {
     "skip_acknowledgement": SKIP_ACKNOWLEDGEMENT,
     "skip_resume_skill_prefix": SKIP_RESUME_SKILL_PREFIX,
     "irrelevant_redirect": IRRELEVANT_REDIRECT,
+    "integrity_violation_redirect": INTEGRITY_VIOLATION_REDIRECT,
     "elaborate_answer": ELABORATE_ANSWER,
     "self_intro_completion_ack": SELF_INTRO_COMPLETION_ACK,
     "self_intro_elaborate": SELF_INTRO_ELABORATE,

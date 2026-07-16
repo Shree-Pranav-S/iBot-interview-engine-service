@@ -441,3 +441,24 @@ class LiveKitInterviewBridge:
             reason=reason,
             elapsed_secs=self.elapsed_secs(),
         )
+
+    async def record_tab_switch(
+        self,
+        *,
+        event_id: uuid.UUID,
+        occurred_at: datetime,
+    ) -> dict[str, object]:
+        """Persist one main-room focus loss and update local terminal state."""
+
+        outcome = await CoreApiSessionService().record_tab_switch(
+            session_id=uuid.UUID(self.interview_session_id),
+            connection_id=self.connection_id,
+            candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+            event_id=event_id,
+            occurred_at=occurred_at,
+        )
+        if bool(outcome.get("terminated")):
+            state = dict(self.state or {})
+            state["session_status"] = "TERMINATED"
+            self.state = state
+        return outcome

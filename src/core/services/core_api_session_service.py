@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import datetime
 
 from src.clients.core_api_client import CoreApiClient, get_core_api_client
 from src.schemas.livekit import (
@@ -75,4 +76,23 @@ class CoreApiSessionService:
             candidate_assessment_id=candidate_assessment_id,
             reason=reason,
             elapsed_secs=elapsed_secs,
+        )
+
+    async def record_tab_switch(
+        self,
+        *,
+        session_id: uuid.UUID,
+        connection_id: str,
+        candidate_assessment_id: uuid.UUID,
+        event_id: uuid.UUID,
+        occurred_at: datetime,
+    ) -> dict[str, object]:
+        """Persist one main-room tab switch through the internal core API."""
+
+        return await self._client().record_tab_switch(
+            session_id=session_id,
+            connection_id=connection_id,
+            candidate_assessment_id=candidate_assessment_id,
+            event_id=event_id,
+            occurred_at=occurred_at,
         )

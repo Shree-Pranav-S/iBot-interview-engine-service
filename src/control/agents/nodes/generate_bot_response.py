@@ -110,6 +110,15 @@ async def generate_bot_response(state: InterviewState) -> dict[str, Any]:
             silence_stage="none",
         )
 
+    if response_type == "integrity_violation":
+        return _reply(
+            state,
+            choose_template("integrity_violation_redirect"),
+            "integrity_violation_redirect",
+            question_type="integrity_violation_response",
+            silence_stage="none",
+        )
+
     if response_type == "interview_meta":
         meta_type = str(classification.get("interview_meta_type") or "")
         template_name = (

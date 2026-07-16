@@ -7,6 +7,7 @@ from typing import Any, Literal, TypedDict
 ResponseType = Literal[
     "answer",
     "clarification",
+    "integrity_violation",
     "irrelevant",
     "interview_meta",
     "silence",
