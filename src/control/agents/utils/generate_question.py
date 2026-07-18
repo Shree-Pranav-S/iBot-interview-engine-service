@@ -25,6 +25,7 @@ from src.control.agents.utils.question_diversity import (
 )
 from src.control.agents.utils.question_strategy import (
     behavioural_questions,
+    question_brief_for_skill,
     questions_for_skill,
 )
 from src.core.exceptions import (
@@ -115,6 +116,7 @@ def _technical_messages(
     seed = str(state.get("question_variation_seed") or "")
     context = {
         "current_technical_skill": skill,
+        "jd_question_brief": question_brief_for_skill(state, skill),
         "inferred_difficulty": state.get("inferred_difficulty"),
         "target_question_difficulty": target_difficulty,
         "previous_question": (

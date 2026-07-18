@@ -57,7 +57,12 @@ async def initialize_interview_context(state: InterviewState) -> dict[str, Any]:
         "skills": _skills(resume.get("skills")),
         "experience_years": _experience_years(resume.get("experience_years")),
     }
-    runtime_sections = _runtime_sections(interview_plan)
+    jd_analysis = context.get("jd_analysis")
+    runtime_sections = _runtime_sections(
+        interview_plan,
+        role_name=str(context.get("role_name") or ""),
+        jd_analysis=jd_analysis if isinstance(jd_analysis, dict) else None,
+    )
     intro_index = next(
         (
             index

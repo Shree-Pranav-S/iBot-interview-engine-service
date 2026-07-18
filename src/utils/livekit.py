@@ -26,6 +26,7 @@ INTERVIEW_PROCTORING_TOPIC = "ibot.proctoring"
 INTERVIEW_CLOSING_EVENT = "interview_closing"
 INTERVIEW_TERMINATED_EVENT = "interview_terminated"
 TAB_SWITCH_EVENT = "tab_switch"
+TAB_SWITCH_RECORDED_EVENT = "tab_switch_recorded"
 
 
 def chunk_for_tts(text: str, *, max_chars: int = 120) -> list[str]:

@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import httpx
+from langsmith import traceable
 from openai import (
     APIConnectionError,
     APIError,
@@ -438,6 +439,7 @@ async def _complete_non_stream(
     return str(content or ""), time.monotonic() - t0
 
 
+@traceable(name="nvidia_holistic_evaluation", run_type="llm")
 async def _complete(
     messages: list[ChatCompletionMessageParam],
     *,

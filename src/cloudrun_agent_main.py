@@ -7,6 +7,9 @@ import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from src.observability.langsmith import configure_langsmith
+from src.observability.logging import configure_logging
+
 
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
@@ -19,6 +22,8 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    configure_logging()
+    configure_langsmith()
     agent_cmd = [
         sys.executable,
         "-m",

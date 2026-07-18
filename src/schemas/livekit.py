@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from src.schemas.base import AppBaseModel
 
@@ -50,6 +50,11 @@ class CandidateSessionBootstrapResponse(AppBaseModel):
 class CandidateConnectionContext(AppBaseModel):
     """Internal authorization result used to create a LiveKit access token."""
 
+    # This payload crosses a service boundary. Core API may add optional context
+    # fields before the interview engine is rolled forward, so additive fields
+    # must not make candidate authorization fail during a staggered deployment.
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
     session_id: uuid.UUID
     connection_id: str
     candidate_assessment_id: uuid.UUID
@@ -59,6 +64,7 @@ class CandidateConnectionContext(AppBaseModel):
     session_token_expires_at: datetime
     elapsed_secs: int = 0
     interview_started: bool = False
+    tab_switch_count: int = Field(default=0, ge=0)
 
 
 class LiveKitTokenResponse(AppBaseModel):
@@ -69,3 +75,4 @@ class LiveKitTokenResponse(AppBaseModel):
     room_name: str
     elapsed_secs: int = 0
     interview_started: bool = False
+    tab_switch_count: int = Field(default=0, ge=0)

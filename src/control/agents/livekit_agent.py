@@ -45,6 +45,7 @@ from src.core.exceptions import (
     UnsupportedSessionModeException,
 )
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
+from src.observability.langsmith import configure_langsmith
 from src.observability.logging import configure_logging
 from src.utils.livekit import (
     INTERVIEW_CLOSING_EVENT,
@@ -52,6 +53,7 @@ from src.utils.livekit import (
     INTERVIEW_PROCTORING_TOPIC,
     INTERVIEW_TERMINATED_EVENT,
     TAB_SWITCH_EVENT,
+    TAB_SWITCH_RECORDED_EVENT,
     chunk_for_tts,
 )
 
@@ -94,6 +96,7 @@ def prewarm(proc: agents.JobProcess) -> None:
         proc: The JobProcess instance from LiveKit.
     """
     configure_logging()
+    configure_langsmith()
     proc.userdata["vad"] = inference.VAD(
         model="silero",
         min_speech_duration=settings.VAD_MIN_SPEECH_DURATION_SECS,
@@ -582,6 +585,37 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
 
+    async def _publish_tab_switch_recorded_signal(
+        self,
+        *,
+        event_id: uuid.UUID,
+        tab_switch_count: int,
+        appended: bool,
+        terminated: bool,
+    ) -> None:
+        """Acknowledge a focus-loss event with the server-authoritative count."""
+
+        try:
+            room = self.session.room_io.room
+            await room.local_participant.publish_data(
+                json.dumps(
+                    {
+                        "type": TAB_SWITCH_RECORDED_EVENT,
+                        "event_id": str(event_id),
+                        "tab_switch_count": tab_switch_count,
+                        "appended": appended,
+                        "terminated": terminated,
+                    }
+                ),
+                topic=INTERVIEW_DATA_TOPIC,
+                reliable=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to acknowledge interview tab switch",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
     async def handle_proctoring_packet(self, packet: rtc.DataPacket) -> None:
         """Validate and persist candidate tab-switch packets from the main room."""
 
@@ -630,7 +664,15 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 "terminated": bool(outcome.get("terminated")),
             },
         )
-        if not bool(outcome.get("terminated")):
+        appended = bool(outcome.get("appended"))
+        terminated = bool(outcome.get("terminated"))
+        await self._publish_tab_switch_recorded_signal(
+            event_id=event_id,
+            tab_switch_count=count,
+            appended=appended,
+            terminated=terminated,
+        )
+        if not terminated:
             return
 
         self._interview_closed = True

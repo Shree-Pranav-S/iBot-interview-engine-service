@@ -343,6 +343,26 @@ def section_expected_signals(state: InterviewState | dict[str, Any]) -> list[str
     return []
 
 
+def question_brief_for_skill(
+    state: InterviewState | dict[str, Any],
+    skill: str | None,
+) -> dict[str, Any]:
+    """Return the bounded JD question brief for one planned technical skill."""
+
+    target = str(skill or "").strip().casefold()
+    if not target:
+        return {}
+    for section in state.get("runtime_sections") or []:
+        section_skill = str(
+            section.get("skill") or section.get("section_name") or ""
+        ).strip()
+        if section_skill.casefold() != target:
+            continue
+        brief = section.get("question_brief")
+        return dict(brief) if isinstance(brief, dict) else {}
+    return {}
+
+
 def is_self_intro_phase(state: InterviewState | dict[str, Any]) -> bool:
     """Return whether the interview is in the self-introduction section."""
 

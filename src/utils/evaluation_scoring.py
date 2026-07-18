@@ -32,10 +32,10 @@ RELEVANCE_SCORE_CAPS: dict[str, float] = {
 }
 
 PENALTY_BY_SEVERITY: dict[str, float] = {
-    "low": 0.15,
-    "medium": 0.40,
-    "high": 1.00,
-    "critical": 2.00,
+    "low": 0.05,
+    "medium": 0.10,
+    "high": 0.20,
+    "critical": 0.30,
 }
 
 

@@ -12,6 +12,7 @@ from src.clients.core_api_client import close_core_api_http_client
 from src.config.settings import settings
 from src.control.agents.graphs import close_graph, init_graph
 from src.data.clients.redis_client import close_redis, init_redis
+from src.observability.langsmith import configure_langsmith
 from src.observability.logging import configure_logging
 
 
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """Build the configured FastAPI application."""
     configure_logging()
+    configure_langsmith()
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
     register_exception_handlers(app)
     app.middleware("http")(request_logging_middleware)

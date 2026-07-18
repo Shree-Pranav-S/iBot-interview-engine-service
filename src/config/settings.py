@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     APP_NAME: str = "interview-engine-service"
     APP_ENV: str = Field(default="development")
 
+    # LangSmith observability. These settings are also copied into the process
+    # environment at startup so direct local runs and child worker processes use
+    # the same tracing configuration as Docker and Cloud Run.
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "iBot"
+    LANGSMITH_WORKSPACE_ID: str | None = None
+
     # Deepgram speech services.
     DEEPGRAM_API_KEY: str = ""
     DEEPGRAM_STT_MODEL: str = "nova-3"

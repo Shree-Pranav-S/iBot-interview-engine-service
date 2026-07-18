@@ -216,6 +216,7 @@ class LiveKitTokenService:
             room_name=room_name,
             elapsed_secs=context.elapsed_secs,
             interview_started=context.interview_started,
+            tab_switch_count=context.tab_switch_count,
         )
 
     async def create_demo_token(

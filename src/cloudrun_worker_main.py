@@ -10,6 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from src.observability.langsmith import configure_langsmith
 from src.observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ def _run_celery_with_restart(celery_cmd: list[str]) -> None:
 
 
 def main() -> None:
+    configure_langsmith()
     celery_cmd = [
         "celery",
         "-A",

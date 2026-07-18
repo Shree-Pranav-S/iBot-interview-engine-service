@@ -11,6 +11,7 @@ from typing import Any, cast
 from langgraph.types import Command
 
 from src.clients.core_api_client import get_core_api_client
+from src.config.settings import settings
 from src.control.agents.graphs import get_graph
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
@@ -61,7 +62,16 @@ class LiveKitInterviewBridge:
         self.interview_session_id = interview_session_id
         self.connection_id = connection_id
         self.state: dict[str, Any] | None = None
-        self._config = {"configurable": {"thread_id": self.candidate_assessment_id}}
+        self._config = {
+            "configurable": {"thread_id": self.candidate_assessment_id},
+            "run_name": "iBot interview turn",
+            "tags": ["ibot", "livekit-interview", settings.APP_ENV],
+            "metadata": {
+                "environment": settings.APP_ENV,
+                "candidate_assessment_id": self.candidate_assessment_id,
+                "interview_session_id": self.interview_session_id,
+            },
+        }
         self._timer_started_monotonic: float | None = None
         self._elapsed_before_connection_secs = 0
 

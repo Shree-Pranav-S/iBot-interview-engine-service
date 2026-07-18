@@ -7,6 +7,7 @@ import time
 from typing import Any, TypeVar
 
 from groq import AsyncGroq
+from langsmith import traceable
 from pydantic import BaseModel
 
 from src.config.settings import settings
@@ -200,6 +201,7 @@ def _usage_log_fields(completion: Any) -> dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+@traceable(name="groq_structured_completion", run_type="llm")
 async def _call_with_fallback(
     purpose: str,
     response_model: type[ResponseModelT],

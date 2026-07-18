@@ -35,6 +35,7 @@ from src.control.agents.utils.question_strategy import (
     behavioural_questions,
     difficulty_plan,
     is_self_intro_phase,
+    question_brief_for_skill,
     questions_for_skill,
     resume_has_skill,
     section_expected_signals,
@@ -142,12 +143,21 @@ def _resolve_target(
             "kind": str(section.get("section_kind") or "technical"),
             "skill": skill or None,
             "signals": list(section.get("expected_signals") or []),
+            "question_brief": (
+                dict(section["question_brief"])
+                if isinstance(section.get("question_brief"), dict)
+                else {}
+            ),
             "entering_new_section": True,
         }
     return {
         "kind": str(state.get("current_section_kind") or "technical"),
         "skill": state.get("current_technical_skill"),
         "signals": section_expected_signals(state),
+        "question_brief": question_brief_for_skill(
+            state,
+            state.get("current_technical_skill"),
+        ),
         "entering_new_section": False,
     }
 
@@ -294,6 +304,7 @@ def _live_interviewer_messages(
         context.update(
             {
                 "current_technical_skill": skill,
+                "jd_question_brief": target.get("question_brief") or {},
                 "difficulty_plan": plan or {},
                 "questions_already_asked_for_skill": [
                     item.get("question_text") for item in asked

@@ -84,7 +84,14 @@ async def test_graph_submissions_share_the_same_resume_contract(
     event = command.resume
     assert reply == "next reply"
     assert graph.ainvoke.await_args.kwargs["config"] == {
-        "configurable": {"thread_id": "candidate-assessment-id"}
+        "configurable": {"thread_id": "candidate-assessment-id"},
+        "run_name": "iBot interview turn",
+        "tags": ["ibot", "livekit-interview", "development"],
+        "metadata": {
+            "environment": "development",
+            "candidate_assessment_id": "candidate-assessment-id",
+            "interview_session_id": "interview-session-id",
+        },
     }
     assert {key: event[key] for key in expected_event} == expected_event
     assert event["elapsed_secs"] == 12
