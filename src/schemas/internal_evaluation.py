@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from src.schemas.evaluation_llm import EvaluationInput
 
-EVALUATION_SCHEMA_VERSION = "holistic-evaluation-v2"
+EVALUATION_SCHEMA_VERSION = "holistic-evaluation-v3"
 
 
 @dataclass(frozen=True)

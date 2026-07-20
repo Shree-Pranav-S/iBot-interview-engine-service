@@ -30,6 +30,7 @@ from livekit.agents import (
     llm,
 )
 from livekit.plugins import deepgram
+from pydantic import ValidationError
 
 from src.config.settings import settings
 from src.control.agents.state import InterviewState
@@ -47,11 +48,15 @@ from src.core.exceptions import (
 from src.core.services.livekit_graph_bridge import LiveKitInterviewBridge
 from src.observability.langsmith import configure_langsmith
 from src.observability.logging import configure_logging
+from src.schemas.livekit import FaceProctoringPacket
 from src.utils.livekit import (
+    FACE_ABSENT_EVENT,
     INTERVIEW_CLOSING_EVENT,
     INTERVIEW_DATA_TOPIC,
     INTERVIEW_PROCTORING_TOPIC,
     INTERVIEW_TERMINATED_EVENT,
+    MULTIPLE_FACES_EVENT,
+    PROCTORING_EVENT_RECORDED_EVENT,
     TAB_SWITCH_EVENT,
     TAB_SWITCH_RECORDED_EVENT,
     chunk_for_tts,
@@ -62,6 +67,7 @@ USER_AWAY_TIMEOUT_SECS = 5.0
 THINK_EXTENSION_TIMEOUT_SECS = 15.0
 POST_TURN_SILENCE_GUARD_SECS = 0.3
 POST_BARGE_RESUMED_SPEECH_GUARD_SECS = 0.75
+PROCTORING_READY_TIMEOUT_SECS = 10.0
 SELF_INTRO_TURN_SETTLE_SECS = 0.8
 SELF_INTRO_TRANSITION_REPLY_TYPE = "self_intro_transition_question"
 TURN_PROCESSING_FAILURE_REPLY = (
@@ -311,6 +317,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         self._current_user_interim = ""
         self._closing_finalize_requested = False
         self._closing_playout_pending = False
+        self._proctoring_ready = asyncio.Event()
         self._turn_lock = asyncio.Lock()
         self._recent_fillers: list[str] = []
 
@@ -563,19 +570,24 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
 
-    async def _publish_interview_terminated_signal(self, tab_switch_count: int) -> None:
-        """Tell the candidate UI that the server enforced the tab-switch limit."""
+    async def _publish_interview_terminated_signal(
+        self,
+        *,
+        reason: str,
+        tab_switch_count: int | None = None,
+    ) -> None:
+        """Tell the candidate UI that the server enforced a proctoring limit."""
 
         try:
             room = self.session.room_io.room
+            payload: dict[str, object] = {
+                "type": INTERVIEW_TERMINATED_EVENT,
+                "reason": reason,
+            }
+            if tab_switch_count is not None:
+                payload["tab_switch_count"] = tab_switch_count
             await room.local_participant.publish_data(
-                json.dumps(
-                    {
-                        "type": INTERVIEW_TERMINATED_EVENT,
-                        "reason": "tab_switch_limit",
-                        "tab_switch_count": tab_switch_count,
-                    }
-                ),
+                json.dumps(payload),
                 topic=INTERVIEW_DATA_TOPIC,
                 reliable=True,
             )
@@ -616,8 +628,180 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
             )
 
+    async def _publish_proctoring_event_recorded_signal(
+        self,
+        *,
+        event_id: uuid.UUID,
+        appended: bool,
+        terminated: bool,
+    ) -> None:
+        """Acknowledge durable receipt of one face proctoring episode."""
+
+        try:
+            room = self.session.room_io.room
+            await room.local_participant.publish_data(
+                json.dumps(
+                    {
+                        "type": PROCTORING_EVENT_RECORDED_EVENT,
+                        "event_id": str(event_id),
+                        "appended": appended,
+                        "terminated": terminated,
+                    }
+                ),
+                topic=INTERVIEW_DATA_TOPIC,
+                reliable=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to acknowledge face proctoring event",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+
+    async def _enforce_policy_termination(
+        self,
+        *,
+        reason: str,
+        tab_switch_count: int | None = None,
+    ) -> None:
+        """Stop media, notify the candidate, and queue the terminal evaluation."""
+
+        if self._interview_closed:
+            return
+        self._interview_closed = True
+        # Policy termination must never enter the normal closing finalizer,
+        # which would overwrite the durable TERMINATED status with COMPLETED.
+        self._closing_finalize_requested = True
+        self._cancel_pending_silence()
+        self._cancel_pending_section_barge()
+        try:
+            self.session.input.set_audio_enabled(False)
+        except Exception:
+            logger.exception(
+                "Failed to disable audio for policy-terminated interview",
+                extra={
+                    "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                    "termination_reason": reason,
+                },
+            )
+        try:
+            await self.session.interrupt(force=True)
+        except Exception:
+            logger.exception(
+                "Failed to interrupt policy-terminated interview audio",
+                extra={
+                    "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                    "termination_reason": reason,
+                },
+            )
+        await self._publish_interview_terminated_signal(
+            reason=reason,
+            tab_switch_count=tab_switch_count,
+        )
+        try:
+            await self.bridge.finalize_policy_termination(reason)
+        except Exception:
+            logger.exception(
+                "Failed to finalize policy-terminated interview",
+                extra={
+                    "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                    "termination_reason": reason,
+                },
+            )
+        try:
+            self.session.shutdown(drain=True)
+        except Exception:
+            logger.exception(
+                "Failed to shutdown policy-terminated LiveKit session",
+                extra={
+                    "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                    "termination_reason": reason,
+                },
+            )
+
+    async def _handle_face_proctoring_payload(
+        self,
+        payload: dict[str, object],
+    ) -> None:
+        """Validate, persist, and acknowledge a face monitoring episode."""
+
+        try:
+            event = FaceProctoringPacket.model_validate(payload)
+        except ValidationError:
+            logger.warning(
+                "Ignored invalid face proctoring packet",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+            return
+
+        try:
+            outcome = await self.bridge.record_proctoring_event(
+                event_id=event.event_id,
+                event_type=event.type,
+                condition_started_at=event.condition_started_at,
+                observed_duration_ms=event.observed_duration_ms,
+                sample_count=event.sample_count,
+                max_face_count=event.max_face_count,
+                min_confidence=event.min_confidence,
+                max_confidence=event.max_confidence,
+                source=event.source,
+                detector_version=event.detector_version,
+                model_name=event.model_name,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist face proctoring event",
+                extra={
+                    "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                    "event_type": event.type,
+                },
+            )
+            return
+
+        appended = bool(outcome.get("appended"))
+        terminated = bool(outcome.get("terminated"))
+        logger.info(
+            "Face proctoring event recorded",
+            extra={
+                "candidate_assessment_id": self.bridge.candidate_assessment_id,
+                "event_type": event.type,
+                "appended": appended,
+                "terminated": terminated,
+            },
+        )
+        await self._publish_proctoring_event_recorded_signal(
+            event_id=event.event_id,
+            appended=appended,
+            terminated=terminated,
+        )
+        if terminated:
+            reason = str(
+                outcome.get("termination_reason")
+                or (
+                    "face_absent_timeout"
+                    if event.type == FACE_ABSENT_EVENT
+                    else "multiple_faces_timeout"
+                )
+            )
+            await self._enforce_policy_termination(reason=reason)
+
     async def handle_proctoring_packet(self, packet: rtc.DataPacket) -> None:
-        """Validate and persist candidate tab-switch packets from the main room."""
+        """Validate and persist candidate proctoring packets from the main room."""
+
+        proctoring_ready = getattr(self, "_proctoring_ready", None)
+        if (
+            isinstance(proctoring_ready, asyncio.Event)
+            and not proctoring_ready.is_set()
+        ):
+            try:
+                await asyncio.wait_for(
+                    proctoring_ready.wait(),
+                    timeout=PROCTORING_READY_TIMEOUT_SECS,
+                )
+            except TimeoutError:
+                # The browser retains unacknowledged events and retries them.
+                # Waiting for graph initialization ensures that even a very
+                # early termination has an opening question for its report.
+                return
 
         participant = packet.participant
         if (
@@ -631,10 +815,24 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
 
         try:
             payload = json.loads(packet.data.decode("utf-8"))
-            if not isinstance(payload, dict) or payload.get("type") != TAB_SWITCH_EVENT:
+            if not isinstance(payload, dict):
                 return
+        except (UnicodeDecodeError, TypeError, json.JSONDecodeError):
+            logger.warning(
+                "Ignored invalid interview proctoring packet",
+                extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
+            )
+            return
+
+        packet_type = payload.get("type")
+        if packet_type in {FACE_ABSENT_EVENT, MULTIPLE_FACES_EVENT}:
+            await self._handle_face_proctoring_payload(payload)
+            return
+        if packet_type != TAB_SWITCH_EVENT:
+            return
+        try:
             event_id = uuid.UUID(str(payload.get("event_id") or ""))
-        except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError):
             logger.warning(
                 "Ignored invalid interview proctoring packet",
                 extra={"candidate_assessment_id": self.bridge.candidate_assessment_id},
@@ -675,15 +873,10 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
         if not terminated:
             return
 
-        self._interview_closed = True
-        # A policy termination must never enter the normal closing finalizer,
-        # which would overwrite the durable TERMINATED status with COMPLETED.
-        self._closing_finalize_requested = True
-        self._cancel_pending_silence()
-        self._cancel_pending_section_barge()
-        self.session.input.set_audio_enabled(False)
-        await self.session.interrupt(force=True)
-        await self._publish_interview_terminated_signal(count)
+        await self._enforce_policy_termination(
+            reason=str(outcome.get("termination_reason") or "tab_switch_limit"),
+            tab_switch_count=count,
+        )
 
     def track_agent_state(self, new_state: str) -> None:
         """
@@ -743,6 +936,7 @@ class InterviewLiveKitAgent(Agent):  # type: ignore[misc]
             )
 
         self._mark_closed_from_state()
+        self._proctoring_ready.set()
         if bool((self.bridge.state or {}).get("timer_started")):
             # A new agent instance is created after reconnect. Restore its local
             # watchdog guard from the durable timer state before speaking again.

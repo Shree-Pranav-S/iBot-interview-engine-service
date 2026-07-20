@@ -27,6 +27,9 @@ INTERVIEW_CLOSING_EVENT = "interview_closing"
 INTERVIEW_TERMINATED_EVENT = "interview_terminated"
 TAB_SWITCH_EVENT = "tab_switch"
 TAB_SWITCH_RECORDED_EVENT = "tab_switch_recorded"
+FACE_ABSENT_EVENT = "face_absent"
+MULTIPLE_FACES_EVENT = "multiple_faces"
+PROCTORING_EVENT_RECORDED_EVENT = "proctoring_event_recorded"
 
 
 def chunk_for_tts(text: str, *, max_chars: int = 120) -> list[str]:

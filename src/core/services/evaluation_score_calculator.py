@@ -25,6 +25,10 @@ from src.utils.evaluation_scoring import (
     _technical_score,
     _violation_penalty,
 )
+from src.utils.evaluation_violations import (
+    deterministic_violation_evidence,
+    violation_category_details,
+)
 
 
 def calculate_final_evaluation(
@@ -110,13 +114,24 @@ def calculate_final_evaluation(
         )
 
     strengths, concerns = _strengths_and_concerns(skill_scores)
+    category_details = violation_category_details(bundle.evaluation_input.violations)
     violation_summary = output.violation_summary.model_dump(mode="json")
     violation_summary.update(
         {
             "penalty_applied": round(violation_penalty, 2),
             "hard_gate_reasons": gates,
+            "category_details": category_details,
         }
     )
+    violation_evidence: list[str] = []
+    for item in [
+        *deterministic_violation_evidence(bundle.evaluation_input.violations),
+        *output.violation_evidence,
+    ]:
+        normalized = item.strip()
+        if normalized and normalized not in violation_evidence:
+            violation_evidence.append(normalized)
+    violation_evidence = violation_evidence[:24]
     recommendation_reasoning = output.recommendation_reasoning.strip()
     if override_reason:
         recommendation_reasoning = (
@@ -147,7 +162,7 @@ def calculate_final_evaluation(
             output.section_communication_scores.model_dump(mode="json")
         ),
         violation_summary=violation_summary,
-        violation_evidence=output.violation_evidence,
+        violation_evidence=violation_evidence,
         raw_overall_score=round(raw_overall_score, 2),
         violation_penalty=round(violation_penalty, 2),
         overall_score=_round_score(final_score),
@@ -158,7 +173,7 @@ def calculate_final_evaluation(
         recommendation_reasoning=recommendation_reasoning,
         strengths=strengths,
         concerns=concerns,
-        prompt_version="nvidia-nemotron-single-stage-v1",
+        prompt_version="nvidia-nemotron-single-stage-v2",
         model_name=settings.NVIDIA_NIM_MODEL,
         model_provider="nvidia_nim",
         evaluation_schema_version=EVALUATION_SCHEMA_VERSION,

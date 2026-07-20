@@ -13,6 +13,7 @@ from langgraph.types import Command
 from src.clients.core_api_client import get_core_api_client
 from src.config.settings import settings
 from src.control.agents.graphs import get_graph
+from src.control.agents.nodes.final_evaluation import trigger_final_evaluation
 from src.control.agents.nodes.persist_turn import (
     drain_background_persistence,
 )
@@ -420,6 +421,74 @@ class LiveKitInterviewBridge:
             },
         )
 
+    async def finalize_policy_termination(self, reason: str) -> None:
+        """Flush pending turns and queue evaluation for a policy termination.
+
+        The Core API has already atomically marked the session and candidate as
+        ``TERMINATED`` before this method is called.  This path deliberately
+        avoids the normal completion APIs so that the durable termination
+        status cannot be overwritten with ``COMPLETED``.
+        """
+
+        state = dict(self.state or {})
+        session_id = str(
+            state.get("interview_session_id") or self.interview_session_id or ""
+        )
+        elapsed = self.elapsed_secs()
+        await drain_background_persistence(session_id or None)
+        if session_id:
+            try:
+                await get_core_api_client().persist_turn(
+                    session_id=session_id,
+                    transcript_items=[],
+                    violations=[],
+                    elapsed_secs=elapsed,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist elapsed time for terminated interview",
+                    extra={
+                        "candidate_assessment_id": self.candidate_assessment_id,
+                        "interview_session_id": session_id,
+                    },
+                )
+        state.update(
+            {
+                "candidate_assessment_id": self.candidate_assessment_id,
+                "interview_session_id": session_id,
+                "session_status": "TERMINATED",
+                "closing_done": True,
+                "elapsed_secs": elapsed,
+                "termination_reason": reason,
+            }
+        )
+        evaluation_update = await trigger_final_evaluation(cast(InterviewState, state))
+        state.update(evaluation_update)
+        self.state = state
+        await try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.INTERVIEW_ENDED,
+                source_service=EventSource.INTERVIEW_ENGINE,
+                correlation_id=session_id or self.candidate_assessment_id,
+                candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+                metadata={
+                    "end_reason": reason,
+                    "session_status": "TERMINATED",
+                    "elapsed_secs": elapsed,
+                },
+                duration_ms=elapsed * 1000,
+            )
+        )
+        logger.info(
+            "Policy-terminated interview; holistic evaluation is queued",
+            extra={
+                "candidate_assessment_id": self.candidate_assessment_id,
+                "interview_session_id": session_id,
+                "termination_reason": reason,
+                "holistic_evaluation_status": state.get("holistic_evaluation_status"),
+            },
+        )
+
     async def record_disconnect(self, reason: str) -> None:
         """
         Record an unexpected LiveKit drop under the bounded reconnect policy.
@@ -470,5 +539,47 @@ class LiveKitInterviewBridge:
         if bool(outcome.get("terminated")):
             state = dict(self.state or {})
             state["session_status"] = "TERMINATED"
+            self.state = state
+        return outcome
+
+    async def record_proctoring_event(
+        self,
+        *,
+        event_id: uuid.UUID,
+        event_type: str,
+        condition_started_at: datetime,
+        observed_duration_ms: int,
+        sample_count: int,
+        max_face_count: int,
+        min_confidence: float | None,
+        max_confidence: float | None,
+        source: str,
+        detector_version: str,
+        model_name: str,
+    ) -> dict[str, object]:
+        """Persist one face monitoring event and mirror terminal state locally."""
+
+        outcome = await CoreApiSessionService().record_proctoring_event(
+            session_id=uuid.UUID(self.interview_session_id),
+            connection_id=self.connection_id,
+            candidate_assessment_id=uuid.UUID(self.candidate_assessment_id),
+            event_id=event_id,
+            event_type=event_type,
+            condition_started_at=condition_started_at,
+            observed_duration_ms=observed_duration_ms,
+            sample_count=sample_count,
+            max_face_count=max_face_count,
+            min_confidence=min_confidence,
+            max_confidence=max_confidence,
+            source=source,
+            detector_version=detector_version,
+            model_name=model_name,
+        )
+        if bool(outcome.get("terminated")):
+            state = dict(self.state or {})
+            state["session_status"] = "TERMINATED"
+            state["termination_reason"] = str(
+                outcome.get("termination_reason") or event_type
+            )
             self.state = state
         return outcome

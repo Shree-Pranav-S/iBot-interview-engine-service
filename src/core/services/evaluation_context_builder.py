@@ -27,6 +27,16 @@ from src.utils.evaluation_context import (
     _technical_skill_specs,
     _transcript_hash,
 )
+from src.utils.evaluation_violations import (
+    normalize_evaluation_violations,
+    violation_affects_evaluation,
+)
+
+
+def _violation_affects_evaluation(violation: dict[str, Any]) -> bool:
+    """Compatibility wrapper around the authoritative violation policy."""
+
+    return violation_affects_evaluation(violation)
 
 
 def build_question_answer_pairs(
@@ -159,11 +169,12 @@ def build_evaluation_context(
             "Cannot evaluate an interview with an empty transcript"
         )
     qa_pairs = build_question_answer_pairs(transcript)
-    violations = [
+    source_violations = [
         dict(item)
         for item in _json_list(source.get("violations"))
         if isinstance(item, dict)
     ]
+    violations = normalize_evaluation_violations(source_violations)
     jd_analysis = _json_object(source.get("jd_analysis"))
     interview_plan = _json_object(source.get("interview_plan"))
     if not interview_plan:

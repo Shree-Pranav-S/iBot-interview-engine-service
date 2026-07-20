@@ -8,12 +8,12 @@ from src.api.middleware.error_handler import register_exception_handlers
 from src.api.middleware.logging import request_logging_middleware
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.livekit import router as livekit_router
-from src.clients.core_api_client import close_core_api_http_client
 from src.config.settings import settings
 from src.control.agents.graphs import close_graph, init_graph
 from src.data.clients.redis_client import close_redis, init_redis
 from src.observability.langsmith import configure_langsmith
 from src.observability.logging import configure_logging
+from src.utils.core_api_helpers import close_core_api_http_client
 
 
 @asynccontextmanager

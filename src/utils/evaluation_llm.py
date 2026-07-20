@@ -36,6 +36,7 @@ from src.schemas.evaluation_llm import (
 )
 from src.schemas.internal_evaluation import EvaluationContextBundle
 from src.utils.evaluation_context import _normalize_skill_key
+from src.utils.evaluation_violations import singleton_policy_minimum_counts
 
 logger = logging.getLogger(__name__)
 _client: AsyncOpenAI | None = None
@@ -150,6 +151,18 @@ def _semantic_errors(
         bundle.evaluation_input.violations
     ):
         errors.append("validated_violation_count cannot exceed supplied violations")
+    required_policy_counts = singleton_policy_minimum_counts(
+        bundle.evaluation_input.violations
+    )
+    actual_severity_counts = output.violation_summary.severity_counts.model_dump(
+        mode="python"
+    )
+    for severity, minimum_count in required_policy_counts.items():
+        if actual_severity_counts[severity] < minimum_count:
+            errors.append(
+                f"severity_counts.{severity} must be at least {minimum_count} "
+                "for supplied authoritative proctoring categories"
+            )
     expected_question_ids = [
         item.question_id for item in bundle.evaluation_input.qa_pairs
     ]

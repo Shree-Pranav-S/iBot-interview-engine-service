@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal, Self
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from src.schemas.base import AppBaseModel
 
@@ -76,3 +77,42 @@ class LiveKitTokenResponse(AppBaseModel):
     elapsed_secs: int = 0
     interview_started: bool = False
     tab_switch_count: int = Field(default=0, ge=0)
+
+
+class FaceProctoringPacket(AppBaseModel):
+    """Duration-qualified browser face-presence/count observation episode."""
+
+    type: Literal["face_absent", "multiple_faces"]
+    event_id: uuid.UUID
+    condition_started_at: datetime
+    observed_duration_ms: int = Field(ge=3_000, le=3_600_000)
+    sample_count: int = Field(ge=1, le=10_000)
+    max_face_count: int = Field(ge=0, le=20)
+    min_confidence: float | None = Field(default=None, ge=0, le=1)
+    max_confidence: float | None = Field(default=None, ge=0, le=1)
+    source: Literal["mediapipe_face_detector", "camera_state"]
+    detector_version: str = Field(min_length=1, max_length=100)
+    model_name: str = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_policy_claim(self) -> Self:
+        """Reject packets that do not meet the public proctoring policy."""
+
+        minimum_duration = 5_000 if self.type == "face_absent" else 3_000
+        if self.observed_duration_ms < minimum_duration:
+            raise ValueError(
+                f"{self.type} must persist for at least {minimum_duration}ms"
+            )
+        if self.source == "camera_state" and self.type != "face_absent":
+            raise ValueError("camera_state can only report face_absent")
+        if self.type == "face_absent" and self.max_face_count != 0:
+            raise ValueError("face_absent cannot report a positive face count")
+        if self.type == "multiple_faces" and self.max_face_count < 2:
+            raise ValueError("multiple_faces must report at least two faces")
+        if (
+            self.min_confidence is not None
+            and self.max_confidence is not None
+            and self.min_confidence > self.max_confidence
+        ):
+            raise ValueError("min_confidence cannot exceed max_confidence")
+        return self

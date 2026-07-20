@@ -96,3 +96,40 @@ class CoreApiSessionService:
             event_id=event_id,
             occurred_at=occurred_at,
         )
+
+    async def record_proctoring_event(
+        self,
+        *,
+        session_id: uuid.UUID,
+        connection_id: str,
+        candidate_assessment_id: uuid.UUID,
+        event_id: uuid.UUID,
+        event_type: str,
+        condition_started_at: datetime,
+        observed_duration_ms: int,
+        sample_count: int,
+        max_face_count: int,
+        min_confidence: float | None,
+        max_confidence: float | None,
+        source: str,
+        detector_version: str,
+        model_name: str,
+    ) -> dict[str, object]:
+        """Persist one face proctoring episode through the internal core API."""
+
+        return await self._client().record_proctoring_event(
+            session_id=session_id,
+            connection_id=connection_id,
+            candidate_assessment_id=candidate_assessment_id,
+            event_id=event_id,
+            event_type=event_type,
+            condition_started_at=condition_started_at,
+            observed_duration_ms=observed_duration_ms,
+            sample_count=sample_count,
+            max_face_count=max_face_count,
+            min_confidence=min_confidence,
+            max_confidence=max_confidence,
+            source=source,
+            detector_version=detector_version,
+            model_name=model_name,
+        )

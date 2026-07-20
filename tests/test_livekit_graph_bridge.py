@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -99,3 +100,63 @@ async def test_graph_submissions_share_the_same_resume_contract(
     assert bridge.state["timer_started"] is True
     assert bridge.state["timer_started_at"] == "2026-01-01T00:00:00+00:00"
     get_graph.assert_awaited_once_with()
+
+
+async def test_policy_termination_flushes_and_queues_without_completing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_id = str(uuid4())
+    session_id = str(uuid4())
+    drain = AsyncMock()
+    trigger = AsyncMock(
+        return_value={
+            "holistic_evaluation_status": "QUEUED",
+            "holistic_evaluation_task_id": "task-123",
+            "next_action": "end",
+        }
+    )
+    record_event = AsyncMock()
+    persist_turn = AsyncMock()
+    monkeypatch.setattr(bridge_module, "drain_background_persistence", drain)
+    monkeypatch.setattr(bridge_module, "trigger_final_evaluation", trigger)
+    monkeypatch.setattr(
+        bridge_module,
+        "try_record_event_in_background",
+        record_event,
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "get_core_api_client",
+        lambda: SimpleNamespace(persist_turn=persist_turn),
+    )
+
+    bridge = LiveKitInterviewBridge(
+        candidate_assessment_id=candidate_id,
+        interview_session_id=session_id,
+        connection_id="connection-id",
+    )
+    bridge.state = {
+        "candidate_assessment_id": candidate_id,
+        "interview_session_id": session_id,
+        "session_status": "TERMINATED",
+        "elapsed_secs": 17,
+    }
+
+    await bridge.finalize_policy_termination("face_absent_continuous_duration_exceeded")
+
+    drain.assert_awaited_once_with(session_id)
+    persist_turn.assert_awaited_once_with(
+        session_id=session_id,
+        transcript_items=[],
+        violations=[],
+        elapsed_secs=17,
+    )
+    trigger.assert_awaited_once()
+    queued_state = trigger.await_args.args[0]
+    assert queued_state["session_status"] == "TERMINATED"
+    assert queued_state["termination_reason"] == (
+        "face_absent_continuous_duration_exceeded"
+    )
+    assert bridge.state["holistic_evaluation_status"] == "QUEUED"
+    assert bridge.state["holistic_evaluation_task_id"] == "task-123"
+    record_event.assert_awaited_once()

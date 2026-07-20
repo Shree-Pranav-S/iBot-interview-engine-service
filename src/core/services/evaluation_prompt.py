@@ -518,6 +518,21 @@ Validate ONLY the supplied violation records against the evidence. NEVER create
 a new violation that was not supplied in the input. Live violation labels may
 be incorrect — re-evaluate each one based on the evidence.
 
+The following duration-qualified proctoring categories are authoritative backend
+policy records and MUST be validated exactly once per category when supplied:
+- tab_switch: LOW severity. metadata.tab_switch_count is the exact number of
+  switches for reporting, but the entire category contributes only one low count.
+- face_absent: HIGH severity. Report the observed duration from metadata, but
+  the entire category contributes only one high count.
+- multiple_faces: HIGH severity. Report the observed duration and maximum face
+  count from metadata, but the entire category contributes only one high count.
+
+For these three categories, occurrence_count, tab_switch_count, recorded_events,
+and duration fields are supporting report details. They MUST NOT be interpreted
+as additional scored violations. Do not omit or downgrade these authoritative
+policy records. Include their exact count/duration details in violation_summary
+and violation_evidence.
+
 Bot timing issues, system interruptions, and technical glitches are NOT
 candidate misconduct. Do not validate them as violations.
 
