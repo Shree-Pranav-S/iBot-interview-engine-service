@@ -99,6 +99,15 @@ def _priority_for_skill(
     Returns:
         The priority score for the skill, defaulting to 1.0 if not found.
     """
+    matched = _matched_priority_for_skill(skill, priorities)
+    return matched if matched is not None else 1.0
+
+
+def _matched_priority_for_skill(
+    skill: str,
+    priorities: dict[str, float],
+) -> float | None:
+    """Return an exact/partial JD priority match without applying a fallback."""
     key = _normalize_skill_key(skill)
     if key in priorities:
         return priorities[key]
@@ -110,7 +119,25 @@ def _priority_for_skill(
             and (candidate in key or key in candidate)
         ):
             return priority
-    return 1.0
+    return None
+
+
+def _time_aware_manual_priority(
+    allocated_mins: float,
+    average_topic_mins: float,
+) -> float:
+    """Give a recruiter-added topic a neutral priority scaled by its time share."""
+    if allocated_mins <= 0 or average_topic_mins <= 0:
+        return 1.0
+    return min(10.0, max(1.0, 5.0 * allocated_mins / average_topic_mins))
+
+
+def _allocated_minutes(value: Any) -> float:
+    """Parse a non-negative plan duration without applying score clamping."""
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _string_list(value: Any) -> list[str]:
@@ -196,9 +223,23 @@ def _technical_skill_specs(
     specs: list[TechnicalSkillSpec] = []
     seen: set[str] = set()
 
-    for section in _json_list(interview_plan.get("sections")):
-        if not isinstance(section, dict):
-            continue
+    planned_sections = [
+        section
+        for section in _json_list(interview_plan.get("sections"))
+        if isinstance(section, dict)
+        and str(section.get("section_name") or "").casefold()
+        not in {"self_intro", "behavioural_cultural"}
+        and str(section.get("skill") or section.get("section_name") or "").strip()
+    ]
+    planned_minutes = [
+        _allocated_minutes(section.get("allocated_mins"))
+        for section in planned_sections
+    ]
+    average_topic_mins = (
+        sum(planned_minutes) / len(planned_minutes) if planned_minutes else 0.0
+    )
+
+    for section in planned_sections:
         name = str(section.get("skill") or section.get("section_name") or "").strip()
         section_name = str(section.get("section_name") or "").casefold()
         if not name or section_name in {"self_intro", "behavioural_cultural"}:
@@ -211,10 +252,19 @@ def _technical_skill_specs(
             for item in _json_list(section.get("expected_signals"))
             if str(item).strip()
         )
+        matched_priority = _matched_priority_for_skill(name, priorities)
+        allocated_mins = _allocated_minutes(section.get("allocated_mins"))
         specs.append(
             TechnicalSkillSpec(
                 name=name,
-                priority_score=_priority_for_skill(name, priorities),
+                priority_score=(
+                    matched_priority
+                    if matched_priority is not None
+                    else _time_aware_manual_priority(
+                        allocated_mins,
+                        average_topic_mins,
+                    )
+                ),
                 expected_signals=expected_signals,
             )
         )
